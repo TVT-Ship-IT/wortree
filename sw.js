@@ -2,7 +2,7 @@
  * 首屏秒开、断网可查：壳文件预缓存，词库缓存优先 + 后台更新。
  * 改了 app.js / app.css / tree3d.js 后，必须同时改这里和 index.html 里的 ?v=N。
  */
-const VERSION = 'cy-v34';
+const VERSION = 'cy-v35';
 const SHELL = VERSION + '-shell';
 const DATA = VERSION + '-data';
 

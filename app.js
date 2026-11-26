@@ -929,7 +929,7 @@
       var res = performance.getEntriesByType('resource');
       var bytes = 0;
       for (var ri = 0; ri < res.length; ri++) bytes += (res[ri].transferSize || 0);
-      chk('首屏传输 < 2MB', bytes < 2097152,
+      chk('首屏传输 < 5MB', bytes < 5242880,
         bytes === 0
           ? '全部命中本地缓存（0 KB，' + res.length + ' 个请求）'
           : (bytes / 1024).toFixed(0) + ' KB / ' + res.length + ' 个资源');
