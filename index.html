@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1,user-scalable=no">
+<meta name="theme-color" content="#080d12">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="词芽">
+<meta name="description" content="查一个单词，给圣诞树浇一次水。养到 2500 词，树会为你炸开。">
+<title>词芽 · 养一棵圣诞树</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="app.css?v=34">
+</head>
+<body>
+
+<div id="app">
+
+  <!-- 顶部状态条 -->
+  <header id="hud">
+    <div class="hud-cell">
+      <span class="hud-k">连续</span>
+      <span class="hud-v"><b id="hudStreak">0</b><i>天</i></span>
+    </div>
+    <div class="hud-cell hud-mid">
+      <span class="hud-k">今天浇水</span>
+      <span class="hud-v"><b id="hudToday">0</b><i>词</i></span>
+    </div>
+    <div class="hud-cell hud-right">
+      <span class="hud-k">总进度</span>
+      <span class="hud-v"><b id="hudTotal">0</b><i>/2500</i></span>
+    </div>
+  </header>
+
+  <div id="panel">
+
+  <!-- 舞台 -->
+  <div id="stage">
+    <canvas id="tree"></canvas>
+
+    <div id="stageTop">
+      <div id="bar"><div id="barFill"></div></div>
+      <div id="barTxt">0 / 2500 · 还差 2500 词</div>
+    </div>
+
+    <div id="stageHint">查一个单词，就是浇一次水 · 划动旋转 · 点树上的词拉近</div>
+
+    <div id="doneCard" class="hidden">
+      <div class="done-emoji">🎄</div>
+      <div class="done-title">培养成功</div>
+      <div class="done-sub">2500 个单词，树为你亮了</div>
+      <button class="btn ghost" id="doneClose">继续养</button>
+    </div>
+  </div>
+
+  <!-- 单词本 -->
+  <section id="viewBook" class="view">
+    <div class="view-head">
+      <h2>单词本</h2>
+      <span id="bookCount" class="muted">0 个</span>
+    </div>
+    <div id="bookList" class="list"></div>
+  </section>
+
+  <!-- 记录 -->
+  <section id="viewLog" class="view">
+    <div class="view-head">
+      <h2>记录单</h2>
+      <span id="logSum" class="muted">共 0 天</span>
+    </div>
+    <div id="logList" class="list"></div>
+  </section>
+
+  <!-- 我的 -->
+  <section id="viewMine" class="view">
+    <div class="view-head"><h2>我的</h2></div>
+    <div class="list">
+      <div class="card">
+        <div class="card-row"><span>词库</span><b id="dictState">加载中…</b></div>
+        <div class="card-row"><span>已学单词</span><b id="mineLearned">0</b></div>
+        <div class="card-row"><span>累计查询</span><b id="mineQueries">0</b></div>
+        <div class="card-row"><span>最长连续</span><b id="mineBest">0 天</b></div>
+      </div>
+      <div class="card">
+        <div class="card-row"><span>数据只存本机</span><i class="muted">换手机/清缓存会丢，建议常导出</i></div>
+        <div class="btnrow">
+          <button class="btn" id="btnExport">导出备份</button>
+          <button class="btn ghost" id="btnImport">导入备份</button>
+        </div>
+        <input id="fileImport" type="file" accept="application/json,.json" hidden>
+      </div>
+      <div class="card">
+        <div class="card-row"><span>我的档案号</span><b id="mineCode">—</b></div>
+        <div class="card-row"><span>上次备份</span><i class="muted" id="mineBackup">从没导出过</i></div>
+        <div class="btnrow">
+          <button class="btn ghost" id="btnCopyCode">复制档案号</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-row"><span>离线可用</span><i class="muted" id="swState">检查中…</i></div>
+        <div class="btnrow">
+          <button class="btn ghost" id="btnReset">清空学习记录</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-row"><span>词库来源</span><i class="muted">ECDICT (MIT) + ipa-dict</i></div>
+      </div>
+    </div>
+  </section>
+
+<!-- 查词结果（放在面板内部，永远不遮挡下面的输入框） -->
+  <div id="sheetMask" class="hidden"></div>
+  <div id="sheet" class="hidden">
+    <div class="sheet-grip"></div>
+    <div id="sheetBody"></div>
+  </div>
+
+</div><!-- /panel -->
+
+  <!-- 查词框 -->
+  <div id="searchwrap">
+    <div class="si">
+      <input id="q" type="search" inputmode="search" autocomplete="off" autocorrect="off"
+             autocapitalize="none" spellcheck="false" enterkeyhint="search"
+             placeholder="输入英文单词，浇水 +1">
+      <button id="qclear" class="ic" aria-label="清空">×</button>
+    </div>
+    <button id="qgo" class="go">查</button>
+  </div>
+
+  <!-- 底部导航 -->
+  <nav id="tabs">
+    <button class="tab on" data-view="tree">
+      <span class="ti">🌲</span><span class="tt">树</span>
+    </button>
+    <button class="tab" data-view="book">
+      <span class="ti">📖</span><span class="tt">单词本</span>
+    </button>
+    <button class="tab" data-view="log">
+      <span class="ti">📋</span><span class="tt">记录</span>
+    </button>
+    <button class="tab" data-view="mine">
+      <span class="ti">⚙️</span><span class="tt">我的</span>
+    </button>
+  </nav>
+
+  <div id="toast"></div>
+</div>
+
+<script src="tree3d.js?v=34"></script>
+<script src="app.js?v=34"></script>
+</body>
+</html>
