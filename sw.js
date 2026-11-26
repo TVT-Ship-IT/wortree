@@ -1,17 +1,24 @@
 /* 词芽 · Service Worker
- * 首屏秒开、断网可查：壳文件预缓存，词库缓存优先 + 后台更新。
- * 改了 app.js / app.css / tree3d.js 后，必须同时改这里和 index.html 里的 ?v=N。
+ * 首屏秒开、断网可查。
+ *
+ * 缓存策略（改过好几次才定下来，别乱动）：
+ *   - 打开页面（navigate）：网络优先。拿到新的 index.html 就更新缓存，
+ *     断网时才回退到缓存的那份。不然版本号升级永远推不到手机上。
+ *   - app.js / app.css / tree3d.js：按完整 URL（含 ?v=N）精确缓存。
+ *     换了版本号就是新的键，自然拿新文件；老版本的键留着也不碍事。
+ *   - 词库 data/*.json：缓存优先 + 后台静默更新。
+ *
+ * 改前端文件后，必须同时改 index.html 的 ?v=N（三处）和这里的 VERSION。
  */
-const VERSION = 'cy-v35';
+const VERSION = 'cy-v41';
 const SHELL = VERSION + '-shell';
 const DATA = VERSION + '-data';
 
+/* 只预缓存不会变的骨架。app.js / app.css / tree3d.js 故意不在这里：
+   它们带 ?v=N，预缓存成不带参数的键就永远命中不了新版本。 */
 const SHELL_FILES = [
   './',
   './index.html',
-  './app.css',
-  './app.js',
-  './tree3d.js',
   './manifest.webmanifest',
   './icons/icon-192.png',
   './icons/icon-512.png'
@@ -50,8 +57,9 @@ self.addEventListener('fetch', (e) => {
   try { url = new URL(req.url); } catch (_) { return; }
   if (url.origin !== self.location.origin) return;
 
-  const isData = url.pathname.endsWith('/data/dict.json') ||
-                 url.pathname.endsWith('/data/core.json') ||
+  const isData = url.pathname.endsWith('/data/core.json') ||
+                 url.pathname.endsWith('/data/mid.json') ||
+                 url.pathname.endsWith('/data/ext.json') ||
                  url.pathname.endsWith('/data/phrase.json');
 
   /* 词库：缓存优先，后台静默更新 */
@@ -76,9 +84,23 @@ self.addEventListener('fetch', (e) => {
     return;
   }
 
-  /* 壳：缓存优先（忽略 ?v= 版本参数），回退网络 */
+  /* 打开页面：网络优先，断网才用缓存 —— 这样版本更新才推得到 */
+  if (req.mode === 'navigate') {
+    e.respondWith(
+      fetch(req).then((res) => {
+        if (res && res.ok) {
+          const copy = res.clone();
+          caches.open(SHELL).then((c) => c.put('./index.html', copy)).catch(() => { });
+        }
+        return res;
+      }).catch(() => caches.match('./index.html').then((p) => p || Response.error()))
+    );
+    return;
+  }
+
+  /* 静态资源：按完整 URL 精确匹配，命中就用，不命中拿网络并存起来 */
   e.respondWith(
-    caches.match(req, { ignoreSearch: true }).then((hit) => {
+    caches.match(req).then((hit) => {
       if (hit) return hit;
       return fetch(req).then((res) => {
         if (res && res.ok && res.type === 'basic') {
@@ -86,13 +108,7 @@ self.addEventListener('fetch', (e) => {
           caches.open(SHELL).then((c) => c.put(req, copy)).catch(() => { });
         }
         return res;
-      }).catch(() => {
-        /* 只有打开页面时才回退到 index.html，别把 HTML 当 JS 返回 */
-        if (req.mode === 'navigate') {
-          return caches.match('./index.html').then((p) => p || Response.error());
-        }
-        return Response.error();
-      });
+      }).catch(() => Response.error());
     })
   );
 });

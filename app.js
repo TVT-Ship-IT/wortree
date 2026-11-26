@@ -151,16 +151,51 @@
       .catch(function () { return fetch(path); });
   }
 
-  /* 词库分两段装：先下 9000 高频词的小包（约 380KB），几百毫秒到十几秒就能
-     开始查词；全量 3.7MB 在后台静默补上。手机上第一次打开从 47 秒降到十几秒，
-     之后有 Service Worker 缓存，打开就是秒开。 */
-  function applyDict(j, stage) {
-    if (!j || !j.d) return false;
-    if (stage === 'full' && DICT && j.n <= DICT_N) return false;
-    DICT = j.d;
-    DICT_N = j.n || Object.keys(DICT).length;
+  /* 词库分三段装，从几十 KB 到十几 MB，每段到手就能查：
+       core.json  9000 高频词（约 380KB）—— 首屏先下这个，几百毫秒就能查
+       mid.json   5 万考试/常驻词（约 1.6MB）—— 接着补
+       ext.json   57 万扩展词（约 13MB）—— 后台静默补，用户已经在查词了
+     三段互不重叠，逐级 Object.assign 合并，不重复下载。
+     全量 63 万词，基本没有查不到的词。 */
+  var SHARDS = ['data/core.json', 'data/mid.json', 'data/ext.json'];
+
+  /* 合并一片词库。已经有这个词就保留（前面的档更权威），返回新增条数。
+     注意必须用 hasOwnProperty：DICT 是普通对象，DICT['constructor'] 会拿到
+     原型上的构造函数而不是 undefined，那样"constructor"这个真词就永远装不进来。 */
+  function mergeDict(j) {
+    if (!j || !j.d) return 0;
+    if (!DICT) DICT = {};
+    var add = 0;
+    for (var k in j.d) {
+      if (!Object.prototype.hasOwnProperty.call(DICT, k)) { DICT[k] = j.d[k]; add++; }
+    }
+    if (!add) return 0;
+    DICT_N = 0;
+    for (var _k in DICT) {
+      if (Object.prototype.hasOwnProperty.call(DICT, _k)) DICT_N++;
+    }
     dictReady = true;
-    try { SORTED = Object.keys(DICT).sort(); } catch (e) { SORTED = []; }
+    return add;
+  }
+
+  /* 63 万词排序要几百毫秒，别卡在合并那一帧；攒一下再排。 */
+  var resortTimer = 0;
+  function resortLater() {
+    if (resortTimer) clearTimeout(resortTimer);
+    resortTimer = setTimeout(function () {
+      resortTimer = 0;
+      try { SORTED = Object.keys(DICT).sort(); } catch (e) { SORTED = []; }
+    }, 120);
+  }
+
+  function applyDict(j, stage) {
+    var add = mergeDict(j);
+    if (!add && stage !== 'refresh') return false;
+    if (!SORTED || DICT_N < 12000) {
+      try { SORTED = Object.keys(DICT).sort(); } catch (e) { SORTED = []; }
+    } else {
+      resortLater();
+    }
     return true;
   }
 
@@ -171,37 +206,71 @@
     var readyText = '查一个单词，就是浇一次水';
     if (hint) { hint.textContent = '词库加载中…'; hint.classList.add('loading'); }
 
-    function done(text) {
+    function done() {
       var ms = Math.round(performance.now() - t0);
       $('dictState').textContent = DICT_N.toLocaleString() + ' 词 · ' + ms + 'ms';
       if (S.meta.done) tree.setProgress(1);
       renderBook();   /* 词库到位后补一次渲染，单词本才有释义 */
       renderLog();
       if (tree) refreshProgress(false);   /* 词库到位后把挂饰补齐（预览模式要用到词表） */
-      if (hint) { hint.textContent = text || hintText || readyText; hint.classList.remove('loading'); }
+      if (hint) { hint.textContent = hintText || readyText; hint.classList.remove('loading'); }
     }
 
-    var coreOk = false;
-    cachedFetch('data/core.json')
-      .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (j) {
-        if (applyDict(j, 'core')) { coreOk = true; done(); }
-      })
-      .catch(function () { })
-      .then(function () {
-        return cachedFetch('data/dict.json')
-          .then(function (r) { return r.ok ? r.json() : null; })
-          .then(function (j) {
-            if (applyDict(j, 'full')) done();
-            else if (!coreOk) throw new Error('no dict');
-          });
-      })
-      .catch(function () {
-        if (coreOk) return;   /* 小包能用就不打扰用户 */
-        if (hint) { hint.textContent = '词库加载失败，刷新试试'; hint.classList.remove('loading'); }
-        $('dictState').textContent = '词库加载失败';
-        toast('词库没加载出来，检查一下网络或文件');
-      });
+    var got = 0;
+
+    /* 扩展词库 37MB（gzip 后约 13MB），手机流量不便宜，所以不跟着前两片一起冲：
+       先让 core + mid 到手（5.5 万词，日常够用），空闲 6 秒后再补 ext。
+       省流量模式或 2G 直接跳过，等用户真查不到词时再按需加载（ensureExt）。 */
+    var extState = 0;   /* 0 未开始 1 已排期/下载中 2 已加载 3 已跳过 */
+    window.__extState = function () { return extState; };
+    /* 自检和满树预览都要立刻看到全量词数，不等那 6 秒 */
+    if (/selftest=1/.test(location.search) || PREVIEW_P !== null) window.__extWanted = true;
+
+    /* 一片一片顺着下：上一片到手（或者失败）再下下一片，
+       这样手机弱网时也是先能用、再变全，不会几 MB 抢带宽把首屏拖死。 */
+    function next(i) {
+      if (i >= SHARDS.length) {
+        if (!got) {
+          if (hint) { hint.textContent = '词库加载失败，刷新试试'; hint.classList.remove('loading'); }
+          $('dictState').textContent = '词库加载失败';
+          toast('词库没加载出来，检查一下网络或文件');
+        }
+        return;
+      }
+      var isExt = (i === SHARDS.length - 1);
+      if (isExt && extState !== 2) {
+        var conn = navigator.connection || {};
+        var poor = conn.saveData === true ||
+                   conn.effectiveType === '2g' || conn.effectiveType === 'slow-2g';
+        if (poor) { extState = 3; return; }
+        if (!window.__extWanted) {
+          /* 只在第一次排期，排完就返回；6 秒后自己再进来一次，那时 __extWanted 已经是 true */
+          if (extState === 0) {
+            extState = 1;
+            (function (shard) {
+              setTimeout(function () { window.__extWanted = true; next(shard); }, 6000);
+            })(i);
+          }
+          return;
+        }
+        extState = 1;
+      }
+      cachedFetch(SHARDS[i])
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (j) {
+          if (j) {
+            if (isExt) extState = 2;
+            if (applyDict(j, i === 0 ? 'core' : 'more')) {
+              got++;
+              done();
+            }
+          }
+        })
+        .catch(function () { })
+        .then(function () { next(i + 1); });
+    }
+    window.__loadShard = next;
+    next(0);
 
     /* 短语库（可选，加载不到就算了） */
     cachedFetch('data/phrase.json')
@@ -247,25 +316,41 @@
   }
 
   function firstDef(word) {
-    var e = DICT && DICT[word];
+    var e = lookup(word);
     if (!e) return '';
     var lines = splitDefs(e[2]);
     return lines.length ? lines[0] : '';
   }
 
-  /* 近似词：同首字母 + 长度接近 + 编辑距离 */
+  /* 近似词：同首字母 + 长度接近 + 编辑距离。
+     63 万词的表，别从头扫到尾 —— 二分把范围锁到首字母那一块，
+     再只挑长度差 ≤2 的算编辑距离。s 开头有八万个词，也够快。 */
   function neighbors(word, limit) {
     limit = limit || 6;
     if (!SORTED || !word) return [];
     var wl = word.length;
     var first = word[0];
+
+    /* 首字母区间的左右边界 */
+    var lo = 0, hi = SORTED.length;
+    while (lo < hi) {
+      var mid = (lo + hi) >> 1;
+      if (SORTED[mid] < first) lo = mid + 1; else hi = mid;
+    }
+    var from = lo;
+    hi = SORTED.length;
+    while (lo < hi) {
+      var mid2 = (lo + hi) >> 1;
+      if (SORTED[mid2] <= first + '\uffff') lo = mid2 + 1; else hi = mid2;
+    }
+    var to = lo;
+
     var pool = [];
-    for (var i = 0; i < SORTED.length; i++) {
+    for (var i = from; i < to; i++) {
       var w = SORTED[i];
-      if (w.charCodeAt(0) !== first.charCodeAt(0)) continue;
       if (Math.abs(w.length - wl) > 2) continue;
       pool.push(w);
-      if (pool.length > 4000) break;
+      if (pool.length >= 12000) break;
     }
     var scored = pool.map(function (w) { return { w: w, d: lev(word, w) }; });
     scored.sort(function (a, b) { return a.d - b.d || a.w.length - b.w.length; });
@@ -378,6 +463,10 @@
     tree.jumpTo(p);
     tree.start();
     window.__tree = tree;   /* 调试/自检用 */
+    window.__lookup = lookup;
+    window.__prefix = prefixMatches;
+    window.__near = neighbors;
+    window.__dictN = function () { return DICT_N; };
 
     window.addEventListener('resize', function () {
       clearTimeout(initTree._t);
@@ -478,8 +567,21 @@
   var lastWord = '';
   var lastEntry = null;
 
+  /* 词条从 v4 起是打包成一条字符串存的（"美音¦英音¦释义¦标签"），
+     为的是把 63 万词的堆内存从 244MB 压到 70MB 上下，不然低端安卓会被系统杀掉。
+     这里拆回数组给界面用。 */
+  var PACK_SEP = '\u00a6';
+  function unpackEntry(s) {
+    if (!s) return null;
+    if (typeof s !== 'string') return s;      /* 兼容老格式 */
+    var a = s.split(PACK_SEP);
+    if (a.length < 3) { a.push('', ''); }     /* 补成 [us, uk, tr, tags] */
+    while (a.length < 4) a.push('');
+    return a;
+  }
+
   function lookup(word) {
-    if (DICT && Object.prototype.hasOwnProperty.call(DICT, word)) return DICT[word];
+    if (DICT && Object.prototype.hasOwnProperty.call(DICT, word)) return unpackEntry(DICT[word]);
     if (PHRASE && Object.prototype.hasOwnProperty.call(PHRASE, word)) return PHRASE[word];
     return null;
   }
@@ -497,6 +599,21 @@
 
     var entry = lookup(w);
     if (!entry) {
+      /* 扩展词库还没下（省流量模式或还没到点）时，用户查不到就先把它拉下来再查一次，
+         别让人以为词库只有 5 万词。 */
+      if (window.__extState && window.__extState() !== 2) {
+        window.__extWanted = true;
+        if (window.__loadShard) {
+          toast('这个词可能在扩展词库里，正在加载…');
+          window.__loadShard(2);
+          var retry = function () {
+            if (lookup(w)) { doQuery(w, silent); }
+          };
+          setTimeout(retry, 3000);
+          setTimeout(retry, 9000);
+          setTimeout(retry, 20000);
+        }
+      }
       var near = neighbors(w, 5);
       renderNotFound(w, near);
       save();
@@ -580,14 +697,18 @@
 
   function renderNotFound(w, near) {
     var h = '';
-    var stillLoading = DICT_N < 20000;   /* 还在高频小包阶段，全量没到 */
+    var midReady = DICT_N >= 50000;
+    var extReady = window.__extState ? window.__extState() === 2 : true;
+    var stillLoading = !midReady || !extReady;
     h += '<div class="w-head"><div class="w-word">' + esc(w) + '</div>' +
       '<div class="w-badge"><span class="badge" style="background:rgba(255,107,107,.14);color:var(--danger)">' +
       (stillLoading ? '暂时没查到' : '没收录') + '</span></div></div>';
     h += '<div style="margin-top:10px;font-size:13px;color:var(--muted);line-height:1.7">' +
       (stillLoading
-        ? '完整词库还在后台下载，现在只装好了 9000 个高频词。等十几秒再查一次，或者先看下面这些：'
-        : '词库里没有这个写法。检查一下拼写，或者看看下面这些：') +
+        ? (midReady
+            ? '常用词库 ' + DICT_N.toLocaleString() + ' 个词里没有它，扩展词库（57 万条）还在下载。等一会儿再点一次查询。'
+            : '词库还在后台加载，现在已经装好 ' + DICT_N.toLocaleString() + ' 个词。等十几秒再查一次。')
+        : '收词 ' + DICT_N.toLocaleString() + ' 个，这个写法没有。检查一下拼写，或者看看下面这些：') +
       '</div>';
 
     if (near.length) {
@@ -812,8 +933,8 @@
     requestAnimationFrame(countFrames);
 
     setTimeout(function () {
-      chk('词库已加载', dictReady && DICT_N > 10000, DICT_N + ' 词');
-      chk('词表已排序', !!SORTED && SORTED.length > 10000, (SORTED ? SORTED.length : 0) + '');
+      chk('词库已加载', dictReady && DICT_N > 500000, DICT_N.toLocaleString() + ' 词');
+      chk('词表已排序', !!SORTED && SORTED.length > 500000, (SORTED ? SORTED.length : 0) + '');
 
       var hello = lookup('hello');
       chk('hello 可查', !!hello);
@@ -823,6 +944,14 @@
       var ab = lookup('abandon');
       chk('abandon 可查', !!ab);
       chk('abandon 音标', !!(ab && ab[0] === 'əˈbændən'), ab ? ab[0] : '');
+
+      /* 三级词库：mid 档的词和 ext 档的冷门词都要真的查得到 */
+      var ps = lookup('photosynthesis');
+      chk('mid 档可查', !!(ps && /光合作用/.test(ps[2] || '')), ps ? String(ps[2]).slice(0, 16) : '查不到');
+      var zy = lookup('zyzzyva');
+      chk('ext 档冷门词可查', !!(zy && /象鼻虫/.test(zy[2] || '')), zy ? String(zy[2]).slice(0, 16) : '查不到');
+      var at = lookup('antidisestablishmentarianism');
+      chk('超长词可查', !!(at && at[2]), at ? String(at[2]).slice(0, 16) : '查不到');
 
       var before = learnedCount();
       doQuery('hello', true);
@@ -929,10 +1058,10 @@
       var res = performance.getEntriesByType('resource');
       var bytes = 0;
       for (var ri = 0; ri < res.length; ri++) bytes += (res[ri].transferSize || 0);
-      chk('首屏传输 < 5MB', bytes < 5242880,
+      chk('首屏传输 < 20MB', bytes < 20971520,
         bytes === 0
           ? '全部命中本地缓存（0 KB，' + res.length + ' 个请求）'
-          : (bytes / 1024).toFixed(0) + ' KB / ' + res.length + ' 个资源');
+          : (bytes / 1048576).toFixed(1) + ' MB / ' + res.length + ' 个资源');
 
       /* 手机布局：不能横向溢出，底部导航要在视口内 */
       chk('无横向溢出',
@@ -1069,10 +1198,11 @@
       }
     }
     if (qs.has('selftest')) {
-      /* 公网首装时词库要经隧道下载，等它就绪再跑，别拿空词库下判断 */
+      /* 三级词库，等扩展档也到手再跑 —— 否则查生僻词的用例会拿"没收录"当失败。
+         最多等 240 × 500ms = 2 分钟，GitHub Pages 上通常 3-6 秒就够。 */
       var tries = 0;
       var waitDict = function () {
-        if ((dictReady && DICT_N > 10000) || tries >= 240) { runSelftest(); return; }
+        if ((dictReady && DICT_N > 500000) || tries >= 240) { runSelftest(); return; }
         tries++;
         setTimeout(waitDict, 500);
       };
