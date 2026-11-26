@@ -966,9 +966,31 @@
     s = s.replace(/[\u3000-\u9fff\uff00-\uffef][\s\S]*$/, ' ');
     var m = s.match(/[A-Za-z][A-Za-z'\-]*(?:[ ]+[A-Za-z][A-Za-z'\-]*){0,4}/);
     if (!m) return '';
-    var w = norm(m[0]);
+    /* 截图 OCR 只装了英文模型，中文会认成一串大写短词（WE / HERS / EBAY / ATH）。
+       第一个词之后一旦遇到"2-4 个字符的全大写词"就截断，短语尾部噪声就被切掉了。 */
+    var toks = m[0].split(' ');
+    if (toks.length > 1) {
+      var cut = toks.length;
+      for (var ti = 1; ti < toks.length; ti++) {
+        var tk = toks[ti];
+        if (tk.length >= 2 && tk.length <= 4 && tk === tk.toUpperCase()) { cut = ti; break; }
+      }
+      if (cut < toks.length) toks = toks.slice(0, cut);
+    }
+    var w = norm(toks.join(' '));
     if (!w || w.length < 2 || w.length > 29) return '';
     return w;
+  }
+
+  /* OCR 的短语常被后面粘上乱码词，逐级缩短再查，'look forward to hers' → 'look forward to' */
+  function lookupSmart(w) {
+    if (lookup(w)) return w;
+    var p = String(w).split(' ');
+    for (var n = p.length - 1; n >= 1; n--) {
+      var t = p.slice(0, n).join(' ');
+      if (lookup(t)) return t;
+    }
+    return null;
   }
 
   function parseImport(raw) {
@@ -1024,10 +1046,132 @@
       });
       if (!uniq.length) { toast('文件里没找到英文单词'); return; }
       var hit = [], miss = [];
-      uniq.forEach(function (w) { if (lookup(w)) hit.push(w); else miss.push(w); });
+      uniq.forEach(function (w) {
+        var g = lookupSmart(w);
+        if (g) { if (hit.indexOf(g) < 0) hit.push(g); } else miss.push(w);
+      });
       showImportPanel(res, uniq, hit, miss, file.name);
     };
     fr.readAsText(file);
+  }
+
+  /* ---- 截图 / 拍照导入 ----
+     引擎是 Tesseract.js（WASM），全部文件放在本仓库 vendor/ 下，
+     不走任何外网 CDN：第一次用下约 7MB，之后 Service Worker 直接给缓存。
+     只装英文模型——单词表都是英文，中文释义认不出来也不影响取词。 */
+  var OCR_LOADING = null;
+  var OCR_WORKER = null;
+  var OCR_BUSY = false;
+
+  function loadOcrEngine() {
+    if (window.Tesseract) return Promise.resolve(window.Tesseract);
+    if (OCR_LOADING) return OCR_LOADING;
+    OCR_LOADING = new Promise(function (res, rej) {
+      var s = document.createElement('script');
+      s.src = 'vendor/tesseract.min.js';
+      s.onload = function () {
+        if (window.Tesseract) res(window.Tesseract);
+        else rej(new Error('识别引擎没起来'));
+      };
+      s.onerror = function () { OCR_LOADING = null; rej(new Error('识别引擎下载失败，检查网络')); };
+      document.head.appendChild(s);
+    });
+    return OCR_LOADING;
+  }
+
+  function ocrSet(pct, text) {
+    var bar = $('ocrBar'), tx = $('ocrTxt');
+    if (bar) bar.style.width = Math.max(2, Math.min(100, pct)) + '%';
+    if (tx && text) tx.textContent = text;
+  }
+
+  function ocrImage(file) {
+    if (OCR_BUSY) { toast('上一张还在识别，稍等一下'); return; }
+    OCR_BUSY = true;
+    var sz = file.size > 1048576 ? (file.size / 1048576).toFixed(1) + 'MB' : Math.round(file.size / 1024) + 'KB';
+    openSheet('<div class="w-head"><div class="w-word">识别图片里的词</div>' +
+      '<div class="w-badge"><span class="chip">' + esc(sz) + '</span></div></div>' +
+      '<div class="ocr-box"><div class="ocr-track"><div id="ocrBar" class="ocr-bar"></div></div>' +
+      '<div id="ocrTxt" class="ocr-txt">正在准备识别引擎…</div></div>' +
+      '<div class="imp-tip">第一次用要下载约 7MB 识别引擎，之后就不用再下了。识别一张图大概 3–10 秒。</div>');
+    ocrSet(4, '正在准备识别引擎（第一次要下载约 7MB，之后不再下）…');
+
+    loadOcrEngine().then(function (T) {
+      ocrSet(14, '引擎就绪，开始识别…');
+      var opt = {
+        workerPath: 'vendor/worker.min.js',
+        corePath: 'vendor/tesseract-core-simd-lstm.wasm.js',
+        langPath: 'vendor',
+        logger: function (m) {
+          if (!m || !m.status) return;
+          var pr = typeof m.progress === 'number' ? m.progress : 0;
+          if (m.status === 'loading language traineddata') ocrSet(16 + pr * 26, '正在加载英文识别模型…');
+          else if (m.status === 'recognizing text') ocrSet(44 + pr * 52, '正在认字… ' + Math.round(pr * 100) + '%');
+        }
+      };
+      var p = OCR_WORKER ? Promise.resolve(OCR_WORKER) : T.createWorker('eng', 1, opt);
+      return p.then(function (w) {
+        OCR_WORKER = w;
+        return w.setParameters({ tessedit_pageseg_mode: '6', preserve_interword_spaces: '1' })
+          .then(function () { return w.recognize(file); });
+      });
+    }).then(function (res) {
+      OCR_BUSY = false;
+      var txt = (res && res.data && res.data.text) || '';
+      ocrSet(100, '识别完成');
+      if (!txt.trim()) { toast('这张图里没认出文字，换张清楚点的试试'); closeSheet(); return; }
+      finishOcr(txt, file.name);
+    }).catch(function (e) {
+      OCR_BUSY = false;
+      if (OCR_WORKER) { try { OCR_WORKER.terminate(); } catch (x) { } OCR_WORKER = null; }
+      toast('识别失败：' + (e && e.message ? e.message : e));
+      closeSheet();
+    });
+  }
+
+  /* 表格类截图的第一行常是表头（Word / Phonetic / Meaning），
+     这些词本身在词库里也有释义，不排掉就会白白多挂三个球。
+     只有同时出现两个以上才算表头——单个 "word" 有可能是用户真想学的词。 */
+  var HEADER_WORDS = {
+    word: 1, words: 1, vocabulary: 1, phonetic: 1, phonetics: 1, pronunciation: 1,
+    meaning: 1, meanings: 1, definition: 1, translation: 1, english: 1, chinese: 1,
+    spelling: 1, unit: 1, lesson: 1, chapter: 1, review: 1, notes: 1, example: 1,
+    sentence: 1, page: 1, number: 1, speech: 1, vocab: 1
+  };
+
+  function stripHeaders(words, force) {
+    var need = force ? 1 : 2;
+    var n = 0, i, h;
+    for (i = 0; i < words.length; i++) {
+      h = String(words[i]).split(' ')[0];
+      if (HEADER_WORDS[h]) n++;
+    }
+    if (n < need) return words;
+    return words.filter(function (w) {
+      return !HEADER_WORDS[w] && !HEADER_WORDS[String(w).split(' ')[0]];
+    });
+  }
+
+  function finishOcr(txt, fname) {
+    var res = { kind: 'list', words: String(txt).split(/\r?\n/), state: null, lines: 0, from: 'ocr' };
+    var seen = {}, uniq = [];
+    res.words.forEach(function (x) {
+      /* 这里不能用 norm() 兜底：OCR 行里"adj. 好斗的"这种剥完词性剩下的残渣
+         会被 norm 压成 "ad" 当成单词收进来。文本文件那条路才需要兜底。 */
+      var w = extractWord(x);
+      if (!w || !/^[a-z][a-z'\- ]{1,28}$/.test(w) || seen[w]) return;
+      seen[w] = 1;
+      uniq.push(w);
+    });
+    uniq = stripHeaders(uniq, true);
+    res.words = uniq;
+    if (!uniq.length) { toast('认出文字了，但没找到英文单词'); closeSheet(); return; }
+    var hit = [], miss = [];
+    uniq.forEach(function (w) {
+      var g = lookupSmart(w);
+      if (g) { if (hit.indexOf(g) < 0) hit.push(g); } else miss.push(w);
+    });
+    showImportPanel(res, uniq, hit, miss, fname || '图片');
   }
 
   function showImportPanel(res, uniq, hit, miss, fname) {
@@ -1048,6 +1192,11 @@
     }
     if (miss.length) {
       h += '<div class="imp-miss">收不到的：' + esc(miss.slice(0, 24).join('、')) + (miss.length > 24 ? ' …' : '') + '</div>';
+    }
+    if (res.from === 'ocr' && hit.length) {
+      var show = hit.slice(0, 60);
+      h += '<div class="imp-tip">认出来的词（' + hit.length + ' 个' + (hit.length > 60 ? '，只列前 60' : '') + '）：</div>' +
+        '<div class="imp-words">' + show.map(function (w) { return '<span class="chip">' + esc(w) + '</span>'; }).join('') + '</div>';
     }
     h += '<div class="w-actions">';
     if (hit.length) {
@@ -1428,6 +1577,12 @@
     $('fileImport').addEventListener('change', function (e) {
       if (e.target.files && e.target.files[0]) importData(e.target.files[0]);
       e.target.value = '';
+    });
+    if ($('btnPhoto')) $('btnPhoto').addEventListener('click', function () { $('filePhoto').click(); });
+    if ($('filePhoto')) $('filePhoto').addEventListener('change', function (e) {
+      var f = e.target.files && e.target.files[0];
+      e.target.value = '';
+      if (f) ocrImage(f);
     });
     $('btnReset').addEventListener('click', function () {
       if (!confirm('清空所有学习记录？单词本也会清掉，建议先导出备份。')) return;

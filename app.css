@@ -687,3 +687,20 @@ body {
   margin-bottom: 10px;
   word-break: break-all;
 }
+/* ---- 图片识别进度 ---- */
+.ocr-box { margin: 14px 0 4px; }
+.ocr-track {
+  height: 8px; border-radius: 999px; background: #0c141c;
+  border: 1px solid var(--line); overflow: hidden;
+}
+.ocr-bar {
+  height: 100%; width: 2%; border-radius: 999px;
+  background: linear-gradient(90deg, #3ddc97, #8ff0c4);
+  transition: width .3s ease;
+  box-shadow: 0 0 10px rgba(61, 220, 151, .5);
+}
+.ocr-txt {
+  margin-top: 10px; font-size: 13px; color: var(--muted); line-height: 1.5;
+}
+.imp-words { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; }
+.imp-words .chip { font-size: 12px; padding: 3px 9px; border-radius: 999px; background: #101a24; border: 1px solid var(--line); color: #cfe6da; }

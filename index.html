@@ -13,7 +13,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
 <link rel="icon" href="icons/icon-192.png">
-<link rel="stylesheet" href="app.css?v=49">
+<link rel="stylesheet" href="app.css?v=53">
 </head>
 <body>
 
@@ -93,6 +93,13 @@
         <input id="fileImport" type="file" accept=".json,.txt,.csv,.tsv,application/json,text/plain,text/csv" hidden>
       </div>
       <div class="card">
+        <div class="card-row"><span>拍照 / 截图导入</span><i class="muted">单词表的照片，认出英文词直接上树</i></div>
+        <div class="btnrow">
+          <button class="btn" id="btnPhoto">选照片识别</button>
+        </div>
+        <input id="filePhoto" type="file" accept="image/*" capture="environment" hidden>
+      </div>
+      <div class="card">
         <div class="card-row"><span>我的档案号</span><b id="mineCode">—</b></div>
         <div class="card-row"><span>上次备份</span><i class="muted" id="mineBackup">从没导出过</i></div>
         <div class="btnrow">
@@ -155,7 +162,7 @@
   <div id="toast"></div>
 </div>
 
-<script src="tree3d.js?v=49"></script>
-<script src="app.js?v=49"></script>
+<script src="tree3d.js?v=53"></script>
+<script src="app.js?v=53"></script>
 </body>
 </html>
