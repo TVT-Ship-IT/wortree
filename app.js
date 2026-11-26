@@ -634,6 +634,18 @@
       }
     }
 
+    if ($('mineImport')) {
+      var li = S.meta.lastImport;
+      if (li && li.n) {
+        var when = new Date(li.ts || Date.now());
+        var hh = ('0' + when.getHours()).slice(-2), mm = ('0' + when.getMinutes()).slice(-2);
+        $('mineImport').textContent = (li.by === 'ocr' ? '照片认出 ' : '文件导入 ') +
+          li.n + ' 个词 · ' + hh + ':' + mm + ' · 可撤销';
+      } else {
+        $('mineImport').textContent = '没有导入记录';
+      }
+    }
+
     if (n >= GOAL && !S.meta.done) {
       S.meta.done = true;
       save(true);
@@ -1152,10 +1164,12 @@
     });
   }
 
+  /* 拍完/选完图，认得出来的词直接上树——不在面板上停下来让你确认。
+     认错的那一两个，去「我的」页点「撤销上次导入」就全撤掉。 */
   function finishOcr(txt, fname) {
-    var res = { kind: 'list', words: String(txt).split(/\r?\n/), state: null, lines: 0, from: 'ocr' };
+    var lines = String(txt).split(/\r?\n/);
     var seen = {}, uniq = [];
-    res.words.forEach(function (x) {
+    lines.forEach(function (x) {
       /* 这里不能用 norm() 兜底：OCR 行里"adj. 好斗的"这种剥完词性剩下的残渣
          会被 norm 压成 "ad" 当成单词收进来。文本文件那条路才需要兜底。 */
       var w = extractWord(x);
@@ -1164,14 +1178,14 @@
       uniq.push(w);
     });
     uniq = stripHeaders(uniq, true);
-    res.words = uniq;
-    if (!uniq.length) { toast('认出文字了，但没找到英文单词'); closeSheet(); return; }
-    var hit = [], miss = [];
+    if (!uniq.length) { toast('这张图里没认出英文单词，换张清楚点的'); closeSheet(); return; }
+    var hit = [];
     uniq.forEach(function (w) {
       var g = lookupSmart(w);
-      if (g) { if (hit.indexOf(g) < 0) hit.push(g); } else miss.push(w);
+      if (g && hit.indexOf(g) < 0) hit.push(g);
     });
-    showImportPanel(res, uniq, hit, miss, fname || '图片');
+    if (!hit.length) { toast('认出了字，但词库里没有这些词'); closeSheet(); return; }
+    applyImport({ kind: 'list', from: 'ocr', words: hit }, hit, false);
   }
 
   function showImportPanel(res, uniq, hit, miss, fname) {
@@ -1264,20 +1278,44 @@
         S.meta.deviceId = keep2;
         S.meta.queries = q;
       }
-      var now = Date.now(), added = 0;
+      var now = Date.now(), added = 0, addedList = [];
       words.forEach(function (w) {
         if (Object.prototype.hasOwnProperty.call(S.learned, w)) return;
         S.learned[w] = now;
+        addedList.push(w);
         added++;
       });
       S.meta.importedN = (S.meta.importedN || 0) + added;
+    }
+    /* 记一笔"上次导入了哪些词"，给「我的」页那个撤销按钮用 */
+    if (res.kind !== 'backup') {
+      S.meta.lastImport = (typeof added === 'number' && addedList.length)
+        ? { ts: Date.now(), n: added, words: addedList.slice(0, 8000), by: res.from || 'file' }
+        : null;
     }
     save(true);
     closeSheet();
     refreshProgress(false);
     renderBook();
     renderLog();
-    toast('导入完成，树上有 ' + learnedCount().toLocaleString() + ' 个词');
+    if (res.from === 'ocr') toast('认出 ' + added + ' 个词，已经挂到树上');
+    else toast('导入完成，树上有 ' + learnedCount().toLocaleString() + ' 个词');
+  }
+
+  function undoImport() {
+    var li = S.meta.lastImport;
+    if (!li || !li.words || !li.words.length) { toast('没有可以撤销的导入'); return; }
+    var n = 0;
+    li.words.forEach(function (w) {
+      if (Object.prototype.hasOwnProperty.call(S.learned, w)) { delete S.learned[w]; n++; }
+    });
+    S.meta.importedN = Math.max(0, (S.meta.importedN || 0) - n);
+    S.meta.lastImport = null;
+    save(true);
+    refreshProgress(false);
+    renderBook();
+    renderLog();
+    toast('已撤销 ' + n + ' 个词');
   }
 
   /* ================= 自检 ================= */
@@ -1595,6 +1633,12 @@
       var f = e.target.files && e.target.files[0];
       e.target.value = '';
       if (f) ocrImage(f);
+    });
+    if ($('btnUndoImport')) $('btnUndoImport').addEventListener('click', function () {
+      var li = S.meta.lastImport;
+      if (!li || !li.n) { toast('没有可以撤销的导入'); return; }
+      if (!confirm('把刚才导入的 ' + li.n + ' 个词从树上撤掉？')) return;
+      undoImport();
     });
     $('btnReset').addEventListener('click', function () {
       if (!confirm('清空所有学习记录？单词本也会清掉，建议先导出备份。')) return;
