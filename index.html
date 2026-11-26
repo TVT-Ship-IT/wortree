@@ -13,7 +13,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
 <link rel="icon" href="icons/icon-192.png">
-<link rel="stylesheet" href="app.css?v=43">
+<link rel="stylesheet" href="app.css?v=45">
 </head>
 <body>
 
@@ -88,9 +88,9 @@
         <div class="card-row"><span>数据只存本机</span><i class="muted">换手机/清缓存会丢，建议常导出</i></div>
         <div class="btnrow">
           <button class="btn" id="btnExport">导出备份</button>
-          <button class="btn ghost" id="btnImport">导入备份</button>
+          <button class="btn ghost" id="btnImport">导入词表</button>
         </div>
-        <input id="fileImport" type="file" accept="application/json,.json" hidden>
+        <input id="fileImport" type="file" accept=".json,.txt,.csv,.tsv,application/json,text/plain,text/csv" hidden>
       </div>
       <div class="card">
         <div class="card-row"><span>我的档案号</span><b id="mineCode">—</b></div>
@@ -150,7 +150,7 @@
   <div id="toast"></div>
 </div>
 
-<script src="tree3d.js?v=43"></script>
-<script src="app.js?v=43"></script>
+<script src="tree3d.js?v=45"></script>
+<script src="app.js?v=45"></script>
 </body>
 </html>

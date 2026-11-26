@@ -649,3 +649,41 @@ body {
   #sheetMask { max-width: 520px; margin: 0 auto; }
   #sheet { max-width: 520px; margin: 0 auto; }
 }
+/* ===== 导入面板 ===== */
+.imp-box {
+  margin: 10px 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, .02);
+}
+.imp-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 9px 12px;
+  font-size: 13px;
+  color: var(--muted);
+  border-bottom: 1px solid rgba(255, 255, 255, .04);
+}
+.imp-row:last-child { border-bottom: 0; }
+.imp-row b { font-size: 17px; color: var(--text); font-variant-numeric: tabular-nums; }
+.imp-row b.good { color: var(--accent); }
+.imp-row b.warn { color: #ffb454; }
+.imp-tip {
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--muted);
+  padding: 2px 2px 8px;
+}
+.imp-tip b { color: var(--text); }
+.imp-miss {
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: #6b7a89;
+  background: rgba(255, 255, 255, .03);
+  border-radius: 8px;
+  padding: 7px 10px;
+  margin-bottom: 10px;
+  word-break: break-all;
+}

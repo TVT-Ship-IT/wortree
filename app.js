@@ -884,28 +884,172 @@
     refreshProgress(false);
   }
 
+  /* 手机上拿到的东西五花八门：别的词典 App 导出的 txt、Excel 另存的 csv、
+     从截图里抄下来的一列词、本 App 自己的备份 json。这里统一吃进去。
+     能认出词库里有释义的词就挂到树上，认不出的跳过并如实报数。 */
+  function extractWord(line) {
+    var s = String(line || '').trim();
+    if (!s) return '';
+    s = s.replace(/^\ufeff/, '').replace(/^\d+\s*[.)、]\s*/, '').replace(/^[-*·•]\s*/, '');
+    s = s.split(/[,\t|;]+/)[0];
+    s = s.replace(/\/[^\/]*\//g, ' ').replace(/\[[^\]]*\]/g, ' ')
+      .replace(/\{[^}]*\}/g, ' ').replace(/\([^)]*\)/g, ' ')
+      .replace(/[（【][^）】]*[）】]/g, ' ');
+    s = s.replace(/\b(vt|vi|adj|adv|prep|conj|pron|art|num|interj|int|abbr|aux|pl|n|v|a|ad)\.\s[\s\S]*$/i, '');
+    s = s.replace(/[\u3000-\u9fff\uff00-\uffef][\s\S]*$/, ' ');
+    var m = s.match(/[A-Za-z][A-Za-z'\-]*(?:[ ]+[A-Za-z][A-Za-z'\-]*){0,4}/);
+    if (!m) return '';
+    var w = norm(m[0]);
+    if (!w || w.length < 2 || w.length > 29) return '';
+    return w;
+  }
+
+  function parseImport(raw) {
+    raw = String(raw || '').replace(/^\ufeff/, '');
+    var out = { kind: 'list', words: [], state: null, lines: 0 };
+    if (raw.charAt(0) === '{' || raw.charAt(0) === '[') {
+      var j = null;
+      try { j = JSON.parse(raw); } catch (e) { j = null; }
+      if (j) {
+        var st = j.state || (j.learned ? j : null);
+        if (st && st.learned) {
+          out.kind = 'backup';
+          out.state = st;
+          out.words = Object.keys(st.learned);
+          (st.book || []).forEach(function (b) { if (b && b.w) out.words.push(b.w); });
+          return out;
+        }
+        var arr = null;
+        if (Array.isArray(j)) arr = j;
+        else if (Array.isArray(j.words)) arr = j.words;
+        else if (Array.isArray(j.list)) arr = j.list;
+        else if (Array.isArray(j.data)) arr = j.data;
+        if (arr) {
+          arr.forEach(function (x) {
+            out.words.push(typeof x === 'string' ? x : String((x && (x.word || x.w)) || ''));
+          });
+          return out;
+        }
+      }
+    }
+    var lines = raw.split(/\r?\n/);
+    out.lines = lines.length;
+    out.words = lines;
+    return out;
+  }
+
   function importData(file) {
     var fr = new FileReader();
     fr.onload = function () {
-      try {
-        var j = JSON.parse(fr.result);
-        var st = j.state || j;
-        if (!st || typeof st !== 'object' || !st.learned) throw new Error('格式不对');
-        if (!confirm('导入会覆盖当前数据，确定？')) return;
+      var res;
+      try { res = parseImport(fr.result); } catch (e) { res = null; }
+      if (!res) { toast('这个文件读不出来'); return; }
+      var seen = {}, uniq = [];
+      res.words.forEach(function (x) {
+        /* 先按"一行一个词条"去拆，拆不出来才退回整串规范化。
+           顺序不能反：norm() 会把 "abandon, vt. 放弃" 压成 "abandon vt"、
+           把 "hello /həˈloʊ/ 你好" 压成 "hello h lo"，那样整行都被当成一个词。 */
+        var w = extractWord(x);
+        if (!w) w = norm(x);
+        if (!w || !/^[a-z][a-z'\- ]{1,28}$/.test(w) || seen[w]) return;
+        seen[w] = 1;
+        uniq.push(w);
+      });
+      if (!uniq.length) { toast('文件里没找到英文单词'); return; }
+      var hit = [], miss = [];
+      uniq.forEach(function (w) { if (lookup(w)) hit.push(w); else miss.push(w); });
+      showImportPanel(res, uniq, hit, miss, file.name);
+    };
+    fr.readAsText(file);
+  }
+
+  function showImportPanel(res, uniq, hit, miss, fname) {
+    var isBackup = res.kind === 'backup';
+    var h = '<div class="w-head"><div class="w-word">导入' + (isBackup ? '备份' : '词表') + '</div>' +
+      '<div class="w-badge"><span class="chip">' + esc(String(fname || '文件').slice(0, 28)) + '</span></div></div>';
+    h += '<div class="imp-box">' +
+      '<div class="imp-row"><span>文件里认出</span><b>' + uniq.length.toLocaleString() + '</b><span>个词</span></div>' +
+      '<div class="imp-row"><span>词库里有释义</span><b class="good">' + hit.length.toLocaleString() + '</b><span>个</span></div>' +
+      (miss.length ? '<div class="imp-row"><span>词库收不到，会跳过</span><b class="warn">' + miss.length.toLocaleString() + '</b><span>个</span></div>' : '') +
+      '</div>';
+    if (!hit.length) {
+      h += '<div class="imp-tip">一个都没匹配上，多半是文件格式不认识。另存成 txt 或 csv 再试一次。</div>';
+    } else if (isBackup) {
+      h += '<div class="imp-tip">这是词芽自己的备份。<b>合并</b>保留两边的记录；<b>替换</b>会清掉这台机器上现在的东西。</div>';
+    } else {
+      h += '<div class="imp-tip">导进来的词会挂到树上、计入总进度，<b>但不算今天的浇水次数</b>，连续天数不受影响。</div>';
+    }
+    if (miss.length) {
+      h += '<div class="imp-miss">收不到的：' + esc(miss.slice(0, 24).join('、')) + (miss.length > 24 ? ' …' : '') + '</div>';
+    }
+    h += '<div class="w-actions">';
+    if (hit.length) {
+      h += '<button class="btn" id="impMerge">' + (isBackup ? '合并进来' : '加到我的树上') + '</button>' +
+        '<button class="btn ghost" id="impReplace">完全替换</button>';
+    }
+    h += '</div>';
+    openSheet(h);
+    var bm = $('impMerge'), br = $('impReplace');
+    if (bm) bm.addEventListener('click', function () { applyImport(res, hit, false); });
+    if (br) br.addEventListener('click', function () {
+      if (!confirm('会用文件里的内容替换掉这台机器上的全部记录，确定？')) return;
+      applyImport(res, hit, true);
+    });
+  }
+
+  function applyImport(res, words, replace) {
+    if (words.length > 30000) {
+      words = words.slice(0, 30000);
+      toast('一次最多导入 3 万个词，后面的跳过了');
+    }
+    if (res.kind === 'backup' && res.state) {
+      var st = res.state;
+      if (replace) {
+        var keep = S.meta.deviceId;
         S = st;
         S.learned = S.learned || {};
         S.days = S.days || {};
         S.book = S.book || [];
         S.meta = S.meta || { queries: 0, best: 0, done: false };
-        save(true);
-        refreshProgress(false);
-        renderBook(); renderLog();
-        toast('导入成功');
-      } catch (e) {
-        toast('备份文件读不出来');
+        if (!S.meta.deviceId) S.meta.deviceId = keep;
+      } else {
+        Object.keys(st.learned || {}).forEach(function (w) {
+          var t = st.learned[w] || Date.now();
+          if (!Object.prototype.hasOwnProperty.call(S.learned, w) || S.learned[w] > t) S.learned[w] = t;
+        });
+        Object.keys(st.days || {}).forEach(function (d) {
+          var a = S.days[d] || [];
+          (st.days[d] || []).forEach(function (w) { if (a.indexOf(w) < 0) a.push(w); });
+          if (a.length) S.days[d] = a;
+        });
+        (st.book || []).forEach(function (b) {
+          if (!b || !b.w) return;
+          for (var i = 0; i < S.book.length; i++) if (S.book[i].w === b.w) return;
+          S.book.push(b);
+        });
+        S.meta.queries = (S.meta.queries || 0) + ((st.meta && st.meta.queries) || 0);
       }
-    };
-    fr.readAsText(file);
+    } else {
+      if (replace) {
+        var keep2 = S.meta.deviceId, q = S.meta.queries || 0;
+        S = freshState();
+        S.meta.deviceId = keep2;
+        S.meta.queries = q;
+      }
+      var now = Date.now(), added = 0;
+      words.forEach(function (w) {
+        if (Object.prototype.hasOwnProperty.call(S.learned, w)) return;
+        S.learned[w] = now;
+        added++;
+      });
+      S.meta.importedN = (S.meta.importedN || 0) + added;
+    }
+    save(true);
+    closeSheet();
+    refreshProgress(false);
+    renderBook();
+    renderLog();
+    toast('导入完成，树上有 ' + learnedCount().toLocaleString() + ' 个词');
   }
 
   /* ================= 自检 ================= */
