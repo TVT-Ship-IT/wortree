@@ -151,13 +151,44 @@
       .catch(function () { return fetch(path); });
   }
 
-  /* 词库分三段装，从几十 KB 到十几 MB，每段到手就能查：
+  /* 词库分两段立刻装，从几十 KB 到几 MB，每段到手就能查：
        core.json  9000 高频词（约 380KB）—— 首屏先下这个，几百毫秒就能查
-       mid.json   5 万考试/常驻词（约 1.6MB）—— 接着补
-       ext.json   57 万扩展词（约 13MB）—— 后台静默补，用户已经在查词了
-     三段互不重叠，逐级 Object.assign 合并，不重复下载。
-     全量 63 万词，基本没有查不到的词。 */
-  var SHARDS = ['data/core.json', 'data/mid.json', 'data/ext.json'];
+       mid.json   5 万考试/常驻词（约 1.6MB）—— 接着补，日常词就齐了
+     之外的 57.7 万扩展词按【首字母】切成 26 片放在 data/ext/<字母>.json，
+     查不到某个词时才去下它那一片（0.07–3.8MB），不会为了一个冷门词拖 37MB。 */
+  var SHARDS = ['data/core.json', 'data/mid.json'];
+
+  /* 扩展片的状态：undefined/0 未开始、1 下载中、2 已装、3 失败 */
+  var EXT_STATE = {};
+  var EXT_WAIT = {};
+  window.__extState = function (c) { return c ? (EXT_STATE[c] || 0) : EXT_STATE; };
+
+  function extLetterOf(w) {
+    var c = String(w).charAt(0);
+    return (c >= 'a' && c <= 'z') ? c : '_';
+  }
+
+  function ensureExtShard(c, cb) {
+    var st = EXT_STATE[c] || 0;
+    if (st === 2) { if (cb) cb(true); return; }
+    if (st === 1) { if (cb) { (EXT_WAIT[c] = EXT_WAIT[c] || []).push(cb); } return; }
+    EXT_STATE[c] = 1;
+    EXT_WAIT[c] = cb ? [cb] : [];
+    cachedFetch('data/ext/' + c + '.json')
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) {
+        if (j && j.d) { applyDict(j, 'more'); EXT_STATE[c] = 2; }
+        else EXT_STATE[c] = 3;
+      })
+      .catch(function () { EXT_STATE[c] = 3; })
+      .then(function () {
+        var q = EXT_WAIT[c] || [];
+        EXT_WAIT[c] = [];
+        var ok = EXT_STATE[c] === 2;
+        for (var i = 0; i < q.length; i++) { try { q[i](ok); } catch (e) { } }
+      });
+  }
+  window.__ensureExt = ensureExtShard;
 
   /* 合并一片词库。已经有这个词就保留（前面的档更权威），返回新增条数。
      注意必须用 hasOwnProperty：DICT 是普通对象，DICT['constructor'] 会拿到
@@ -218,16 +249,9 @@
 
     var got = 0;
 
-    /* 扩展词库 37MB（gzip 后约 13MB），手机流量不便宜，所以不跟着前两片一起冲：
-       先让 core + mid 到手（5.5 万词，日常够用），空闲 6 秒后再补 ext。
-       省流量模式或 2G 直接跳过，等用户真查不到词时再按需加载（ensureExt）。 */
-    var extState = 0;   /* 0 未开始 1 已排期/下载中 2 已加载 3 已跳过 */
-    window.__extState = function () { return extState; };
-    /* 自检和满树预览都要立刻看到全量词数，不等那 6 秒 */
-    if (/selftest=1/.test(location.search) || PREVIEW_P !== null) window.__extWanted = true;
-
     /* 一片一片顺着下：上一片到手（或者失败）再下下一片，
-       这样手机弱网时也是先能用、再变全，不会几 MB 抢带宽把首屏拖死。 */
+       这样手机弱网时也是先能用、再变全，不会几 MB 抢带宽把首屏拖死。
+       扩展词库不在这里排期，走 ensureExtShard 按首字母按需加载。 */
     function next(i) {
       if (i >= SHARDS.length) {
         if (!got) {
@@ -237,39 +261,17 @@
         }
         return;
       }
-      var isExt = (i === SHARDS.length - 1);
-      if (isExt && extState !== 2) {
-        var conn = navigator.connection || {};
-        var poor = conn.saveData === true ||
-                   conn.effectiveType === '2g' || conn.effectiveType === 'slow-2g';
-        if (poor) { extState = 3; return; }
-        if (!window.__extWanted) {
-          /* 只在第一次排期，排完就返回；6 秒后自己再进来一次，那时 __extWanted 已经是 true */
-          if (extState === 0) {
-            extState = 1;
-            (function (shard) {
-              setTimeout(function () { window.__extWanted = true; next(shard); }, 6000);
-            })(i);
-          }
-          return;
-        }
-        extState = 1;
-      }
       cachedFetch(SHARDS[i])
         .then(function (r) { return r.ok ? r.json() : null; })
         .then(function (j) {
-          if (j) {
-            if (isExt) extState = 2;
-            if (applyDict(j, i === 0 ? 'core' : 'more')) {
-              got++;
-              done();
-            }
+          if (j && applyDict(j, i === 0 ? 'core' : 'more')) {
+            got++;
+            done();
           }
         })
         .catch(function () { })
         .then(function () { next(i + 1); });
     }
-    window.__loadShard = next;
     next(0);
 
     /* 短语库（可选，加载不到就算了） */
@@ -599,20 +601,20 @@
 
     var entry = lookup(w);
     if (!entry) {
-      /* 扩展词库还没下（省流量模式或还没到点）时，用户查不到就先把它拉下来再查一次，
-         别让人以为词库只有 5 万词。 */
-      if (window.__extState && window.__extState() !== 2) {
-        window.__extWanted = true;
-        if (window.__loadShard) {
-          toast('这个词可能在扩展词库里，正在加载…');
-          window.__loadShard(2);
-          var retry = function () {
-            if (lookup(w)) { doQuery(w, silent); }
-          };
-          setTimeout(retry, 3000);
-          setTimeout(retry, 9000);
-          setTimeout(retry, 20000);
-        }
+      /* 常用两片里没有，就去拉这个词首字母对应的扩展片（一次 0.1–4MB），到了再重查一遍。
+         失败（404/断网）就别重试了，直接给近似词，免得每次点击都白等。 */
+      var L = extLetterOf(w);
+      var st = EXT_STATE[L] || 0;
+      if (w.length > 1 && st !== 2 && st !== 3) {
+        toast('正在加载「' + (L === '_' ? '其它' : L.toUpperCase()) + '」开头的扩展词…');
+        ensureExtShard(L, function (ok) {
+          if (ok && lookup(w)) { doQuery(w, silent); return; }
+          var near2 = neighbors(w, 5);
+          renderNotFound(w, near2);
+          save();
+          refreshProgress(false);
+        });
+        return;
       }
       var near = neighbors(w, 5);
       renderNotFound(w, near);
@@ -698,17 +700,18 @@
   function renderNotFound(w, near) {
     var h = '';
     var midReady = DICT_N >= 50000;
-    var extReady = window.__extState ? window.__extState() === 2 : true;
-    var stillLoading = !midReady || !extReady;
+    var L = extLetterOf(w);
+    var extSt = EXT_STATE[L] || 0;
+    var stillLoading = !midReady || extSt === 1;
     h += '<div class="w-head"><div class="w-word">' + esc(w) + '</div>' +
       '<div class="w-badge"><span class="badge" style="background:rgba(255,107,107,.14);color:var(--danger)">' +
-      (stillLoading ? '暂时没查到' : '没收录') + '</span></div></div>';
+      (stillLoading ? '还在加载' : '没收录') + '</span></div></div>';
     h += '<div style="margin-top:10px;font-size:13px;color:var(--muted);line-height:1.7">' +
-      (stillLoading
-        ? (midReady
-            ? '常用词库 ' + DICT_N.toLocaleString() + ' 个词里没有它，扩展词库（57 万条）还在下载。等一会儿再点一次查询。'
-            : '词库还在后台加载，现在已经装好 ' + DICT_N.toLocaleString() + ' 个词。等十几秒再查一次。')
-        : '收词 ' + DICT_N.toLocaleString() + ' 个，这个写法没有。检查一下拼写，或者看看下面这些：') +
+      (!midReady
+        ? '常用词库还在下载，现在已经装好 ' + DICT_N.toLocaleString() + ' 个词。等十几秒再查一次。'
+        : (extSt === 3
+            ? '「' + (L === '_' ? '这个' : L.toUpperCase()) + '」开头的扩展词库没加载成功（可能是网络），常用 ' + DICT_N.toLocaleString() + ' 个词里没有它。'
+            : '常用 ' + DICT_N.toLocaleString() + ' 词里没有它，扩展词库（57.7 万词，按首字母分 26 片）还在下载。等一会儿再点一次查询。')) +
       '</div>';
 
     if (near.length) {
@@ -933,8 +936,8 @@
     requestAnimationFrame(countFrames);
 
     setTimeout(function () {
-      chk('词库已加载', dictReady && DICT_N > 500000, DICT_N.toLocaleString() + ' 词');
-      chk('词表已排序', !!SORTED && SORTED.length > 500000, (SORTED ? SORTED.length : 0) + '');
+      chk('词库已加载', dictReady && DICT_N > 50000, DICT_N.toLocaleString() + ' 词');
+      chk('词表已排序', !!SORTED && SORTED.length > 50000, (SORTED ? SORTED.length : 0) + '');
 
       var hello = lookup('hello');
       chk('hello 可查', !!hello);
@@ -945,7 +948,7 @@
       chk('abandon 可查', !!ab);
       chk('abandon 音标', !!(ab && ab[0] === 'əˈbændən'), ab ? ab[0] : '');
 
-      /* 三级词库：mid 档的词和 ext 档的冷门词都要真的查得到 */
+      /* 词库：mid 档的词、按首字母按需加载的 ext 冷门词都要真的查得到 */
       var ps = lookup('photosynthesis');
       chk('mid 档可查', !!(ps && /光合作用/.test(ps[2] || '')), ps ? String(ps[2]).slice(0, 16) : '查不到');
       var zy = lookup('zyzzyva');
@@ -1198,11 +1201,24 @@
       }
     }
     if (qs.has('selftest')) {
-      /* 三级词库，等扩展档也到手再跑 —— 否则查生僻词的用例会拿"没收录"当失败。
-         最多等 240 × 500ms = 2 分钟，GitHub Pages 上通常 3-6 秒就够。 */
+      /* 词库现在是 core + mid 立刻装、扩展词按首字母按需装。
+         自检要查 a / p / z 三个首字母的词，先把这三片拉下来再跑。
+         最多等 240 × 500ms = 2 分钟。 */
       var tries = 0;
+      var extReadyForTest = false;
+      var preload = function () {
+        var need = ['a', 'p', 'z'];
+        var k = 0;
+        var step = function () {
+          if (k >= need.length) { extReadyForTest = true; return; }
+          ensureExtShard(need[k++], step);
+        };
+        step();
+      };
       var waitDict = function () {
-        if ((dictReady && DICT_N > 500000) || tries >= 240) { runSelftest(); return; }
+        var okNow = dictReady && DICT_N > 50000;
+        if (okNow && !extReadyForTest) { preload(); }
+        if ((okNow && extReadyForTest) || tries >= 240) { runSelftest(); return; }
         tries++;
         setTimeout(waitDict, 500);
       };

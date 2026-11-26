@@ -10,7 +10,7 @@
  *
  * 改前端文件后，必须同时改 index.html 的 ?v=N（三处）和这里的 VERSION。
  */
-const VERSION = 'cy-v41';
+const VERSION = 'cy-v42';
 const SHELL = VERSION + '-shell';
 const DATA = VERSION + '-data';
 
@@ -57,10 +57,9 @@ self.addEventListener('fetch', (e) => {
   try { url = new URL(req.url); } catch (_) { return; }
   if (url.origin !== self.location.origin) return;
 
-  const isData = url.pathname.endsWith('/data/core.json') ||
-                 url.pathname.endsWith('/data/mid.json') ||
-                 url.pathname.endsWith('/data/ext.json') ||
-                 url.pathname.endsWith('/data/phrase.json');
+  /* 词库：core/mid 立刻装，data/ext/<字母>.json 是 26 片扩展词按需装。
+   两者都走"缓存优先 + 后台更新"，装过的片断网也能用。 */
+  const isData = url.pathname.indexOf('/data/') >= 0 && url.pathname.endsWith('.json');
 
   /* 词库：缓存优先，后台静默更新 */
   if (isData) {
