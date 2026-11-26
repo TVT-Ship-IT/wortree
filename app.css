@@ -704,3 +704,6 @@ body {
 }
 .imp-words { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; }
 .imp-words .chip { font-size: 12px; padding: 3px 9px; border-radius: 999px; background: #101a24; border: 1px solid var(--line); color: #cfe6da; }
+.imp-words .chip.x { cursor: pointer; transition: background .15s, border-color .15s; }
+.imp-words .chip.x:hover { background: #17242f; border-color: #2c4152; }
+.imp-words .chip.x::after { content: " ×"; color: #7d8b9a; }

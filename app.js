@@ -1195,8 +1195,10 @@
     }
     if (res.from === 'ocr' && hit.length) {
       var show = hit.slice(0, 60);
-      h += '<div class="imp-tip">认出来的词（' + hit.length + ' 个' + (hit.length > 60 ? '，只列前 60' : '') + '）：</div>' +
-        '<div class="imp-words">' + show.map(function (w) { return '<span class="chip">' + esc(w) + '</span>'; }).join('') + '</div>';
+      h += '<div class="imp-tip">认出来的词（' + hit.length + ' 个' + (hit.length > 60 ? '，只列前 60' : '') + '）· 认错的点一下去掉：</div>' +
+        '<div class="imp-words">' + show.map(function (w, i) {
+          return '<span class="chip x" data-i="' + i + '">' + esc(w) + '</span>';
+        }).join('') + '</div>';
     }
     h += '<div class="w-actions">';
     if (hit.length) {
@@ -1210,6 +1212,16 @@
     if (br) br.addEventListener('click', function () {
       if (!confirm('会用文件里的内容替换掉这台机器上的全部记录，确定？')) return;
       applyImport(res, hit, true);
+    });
+    var chips = document.querySelector('.imp-words');
+    if (chips) chips.addEventListener('click', function (e) {
+      var t = e.target;
+      while (t && t !== chips && !(t.className && String(t.className).indexOf('chip') >= 0)) t = t.parentNode;
+      if (!t || t === chips) return;
+      var i = parseInt(t.getAttribute('data-i'), 10);
+      if (isNaN(i) || i < 0 || i >= hit.length) return;
+      hit.splice(i, 1);
+      showImportPanel(res, uniq, hit, miss, fname);
     });
   }
 
