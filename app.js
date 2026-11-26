@@ -7,6 +7,8 @@
   var GOAL = 2500;
   var DAILY_GOAL = 20;
   var KEY = 'cy_state_v3';
+  var KEY_BAK = 'cy_state_v3_bak';   /* 上一份自动备份：主记录写坏/读不出时兜底 */
+  var SCHEMA = 5;                    /* 数据结构版本，只增不减 */
   var OLD_KEY = 'cy_book_v1';
   /* 仅调试：地址栏 ?p=0.5 时按比例预览树，不写真实数据 */
   var PREVIEW_P = null;
@@ -58,19 +60,48 @@
   function freshState() {
     return {
       v: 3,
+      sv: SCHEMA,
       learned: {},
       days: {},
       book: [],
-      meta: { queries: 0, best: 0, done: false, first: Date.now(), deviceId: makeDeviceCode() }
+      meta: { queries: 0, best: 0, done: false, first: Date.now(), deviceId: makeDeviceCode(), importedN: 0 }
     };
   }
 
+  /* 数据结构的版本号。改动只允许"补字段"，永远不许删字段、不许改字段含义。
+     每次改结构就 +1，并在 migrate() 里加一段 —— 这样老用户手里的记录
+     无论跨多少个版本，读上来都还在。 */
+  function migrate(s) {
+    if (!s || typeof s !== 'object') return s;
+    var from = typeof s.sv === 'number' ? s.sv : 0;
+    if (from >= SCHEMA) return s;
+    s.meta = s.meta || {};
+    if (from < 4) {
+      /* v0~v3：早期只有 learned/days/book，deviceId 是后来加的 */
+      if (!s.meta.deviceId) s.meta.deviceId = makeDeviceCode();
+      if (typeof s.meta.first !== 'number') s.meta.first = Date.now();
+    }
+    if (from < 5) {
+      /* v5：区分"自己查的"和"导入进来的" */
+      if (typeof s.meta.importedN !== 'number') s.meta.importedN = 0;
+    }
+    s.sv = SCHEMA;
+    return s;
+  }
+
   function loadState() {
-    var s = null;
+    var s = null, usedBak = false;
     try {
       var raw = localStorage.getItem(KEY);
       if (raw) s = JSON.parse(raw);
     } catch (e) { s = null; }
+    /* 主记录读不出来时先试备份槽，别急着当新用户 */
+    if (!s || typeof s !== 'object') {
+      try {
+        var bak = localStorage.getItem(KEY_BAK);
+        if (bak) { s = JSON.parse(bak); usedBak = true; }
+      } catch (e) { s = null; }
+    }
     if (!s || typeof s !== 'object') s = freshState();
 
     s.learned = s.learned && typeof s.learned === 'object' ? s.learned : {};
@@ -80,6 +111,12 @@
     if (typeof s.meta.queries !== 'number') s.meta.queries = 0;
     if (typeof s.meta.best !== 'number') s.meta.best = 0;
     if (!s.meta.deviceId) s.meta.deviceId = makeDeviceCode();
+
+    s = migrate(s);
+    if (usedBak) {
+      try { localStorage.setItem(KEY, JSON.stringify(s)); } catch (e) { }
+      setTimeout(function () { toast('主记录读不出来，已从备份恢复'); }, 900);
+    }
 
     /* 迁移旧版生词本 */
     try {
@@ -101,17 +138,29 @@
 
   var saveTimer = 0;
   function save(now) {
+    function write() {
+      try {
+        var next = JSON.stringify(S);
+        var cur = localStorage.getItem(KEY);
+        /* 覆盖主记录之前，把上一份挪进备份槽。这样任何一次写坏都还有上一版。
+           只有内容真的变了才挪，避免把备份槽也写成同一个坏值。 */
+        if (cur && cur !== next) {
+          try { localStorage.setItem(KEY_BAK, cur); } catch (e) { }
+        }
+        localStorage.setItem(KEY, next);
+      } catch (e) {
+        /* 存不下也不清数据：内存里那份还在，让用户先导出 */
+        toast('本地存储快满了，去「我的」页导出一份备份');
+      }
+    }
     if (now) {
       clearTimeout(saveTimer);
       saveTimer = 0;
-      try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { toast('存储空间不足'); }
+      write();
       return;
     }
     if (saveTimer) return;
-    saveTimer = setTimeout(function () {
-      saveTimer = 0;
-      try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { toast('存储空间不足'); }
-    }, 400);
+    saveTimer = setTimeout(function () { saveTimer = 0; write(); }, 400);
   }
 
   function learnedCount() { return Object.keys(S.learned).length; }
@@ -557,13 +606,31 @@
 
     if ($('mineCode')) {
       $('mineCode').textContent = S.meta.deviceId || '—';
-      var lb = S.meta.lastBackup | 0;
+      var lb = Number(S.meta.lastBackup) || 0;
       if (!lb) {
         $('mineBackup').textContent = '从没导出过，点上面「导出备份」存一份';
       } else {
         var days = Math.floor((Date.now() - lb) / 86400000);
         $('mineBackup').textContent = days <= 0 ? '今天' : (days + ' 天前');
         if (days >= 7) $('mineBackup').textContent += '（建议再导一次）';
+      }
+    }
+
+    if ($('mineAge')) {
+      var f = Number(S.meta.first) || 0;
+      var aged = f ? Math.max(1, Math.floor((Date.now() - f) / 86400000) + 1) : 1;
+      $('mineAge').textContent = aged + ' 天';
+      if ($('mineHealth')) {
+        var mineN = 0, mineBook = S.book.length, mineDays = 0;
+        try { mineN = Object.keys(S.learned).length; } catch (e) { mineN = 0; }
+        try { mineDays = Object.keys(S.days).length; } catch (e) { mineDays = 0; }
+        var bits = [];
+        bits.push(mineN + ' 个词');
+        if (mineDays) bits.push(mineDays + ' 天有记录');
+        if (mineBook) bits.push(mineBook + ' 个收藏');
+        var hasBak = false;
+        try { hasBak = !!localStorage.getItem('cy_state_v3_bak'); } catch (e) { hasBak = false; }
+        $('mineHealth').textContent = '正常 · ' + bits.join(' · ') + (hasBak ? ' · 已自动备份' : '');
       }
     }
 
@@ -1057,8 +1124,11 @@
     var lines = [];
     var ok = 0, bad = 0;
     /* 自检会写数据，先备份，跑完还原，保证不污染真实学习记录 */
-    var backup = null;
-    try { backup = localStorage.getItem(KEY); } catch (e) { backup = null; }
+    var backup = null, backupBak = null;
+    try {
+      backup = localStorage.getItem(KEY);
+      backupBak = localStorage.getItem(KEY_BAK);
+    } catch (e) { backup = null; backupBak = null; }
 
     function chk(name, cond, extra) {
       if (cond) { ok++; lines.push('PASS  ' + name + (extra ? '  [' + extra + ']' : '')); }
@@ -1070,6 +1140,8 @@
       try {
         if (backup === null) localStorage.removeItem(KEY);
         else localStorage.setItem(KEY, backup);
+        if (backupBak === null) localStorage.removeItem(KEY_BAK);
+        else localStorage.setItem(KEY_BAK, backupBak);
       } catch (e) { /* 忽略 */ }
       S = loadState();
       closeSheet();
@@ -1247,7 +1319,33 @@
       var ft = performance.now();
       for (var fi = 0; fi < 30; fi++) tree.frame(16.7);
       perfAvg = (performance.now() - ft) / 30;
-      chk('单帧渲染 < 8ms', perfAvg < 8, perfAvg.toFixed(2) + 'ms');
+      /* ---- 数据安全：老数据能升级、写坏了能救回来 ---- */
+    try {
+      var probe = {
+        v: 3, learned: { 'aaa': 1, 'bbb': 2 },
+        days: { '2026-01-01': ['aaa'] },
+        book: [{ w: 'aaa', ts: 1 }],
+        meta: { queries: 7, deviceId: 'CY-TEST-AAAA' }
+      };
+      var mig = migrate(JSON.parse(JSON.stringify(probe)));
+      chk('老版本数据能升级', mig.sv === SCHEMA && Object.keys(mig.learned).length === 2 && mig.meta.deviceId === 'CY-TEST-AAAA',
+        'sv=' + mig.sv + ' 词=' + Object.keys(mig.learned).length);
+      chk('升级不删任何记录', mig.days['2026-01-01'].length === 1 && mig.book.length === 1 && mig.meta.queries === 7,
+        '日=' + Object.keys(mig.days).length + ' 收藏=' + mig.book.length + ' 查询=' + mig.meta.queries);
+    } catch (e) { chk('老版本数据能升级', false, String(e)); }
+
+    try {
+      localStorage.setItem(KEY, '{这是坏掉的json');
+      localStorage.setItem(KEY_BAK, JSON.stringify({
+        v: 3, sv: SCHEMA, learned: { 'zzz': 1 }, days: {}, book: [],
+        meta: { queries: 3, deviceId: 'CY-BAK1-TEST' }
+      }));
+      var rec = loadState();
+      chk('主记录坏了从备份恢复', Object.keys(rec.learned).length === 1 && rec.meta.deviceId === 'CY-BAK1-TEST',
+        '词=' + Object.keys(rec.learned).length + ' 档案号=' + rec.meta.deviceId);
+    } catch (e) { chk('主记录坏了从备份恢复', false, String(e)); }
+
+    chk('单帧渲染 < 8ms', perfAvg < 8, perfAvg.toFixed(2) + 'ms');
 
       var t1 = performance.now();
       prefixMatches('a', 8); prefixMatches('b', 8);
@@ -1289,6 +1387,9 @@
   /* ================= 启动 ================= */
   function boot() {
     S = loadState();
+    /* 立刻落一次盘：把 migrate() 补的新字段写进去，同时建立第一个备份槽。
+       这一步只写不读，任何情况下都不会减少已有的记录。 */
+    save(true);
 
     /* 键盘弹出时把面板缩到可视区，底部输入框不会被挡住 */
     if (window.visualViewport) {
@@ -1331,6 +1432,8 @@
     $('btnReset').addEventListener('click', function () {
       if (!confirm('清空所有学习记录？单词本也会清掉，建议先导出备份。')) return;
       S = freshState();
+      /* 备份槽必须一起清，否则下次启动会把它当成"主记录损坏"给恢复回来 */
+      try { localStorage.removeItem(KEY_BAK); } catch (e) { }
       save(true);
       refreshProgress(false);
       renderBook(); renderLog();
