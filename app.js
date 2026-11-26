@@ -158,9 +158,10 @@
      查不到某个词时才去下它那一片（0.07–3.8MB），不会为了一个冷门词拖 37MB。 */
   var SHARDS = ['data/core.json', 'data/mid.json'];
 
-  /* 扩展片的状态：undefined/0 未开始、1 下载中、2 已装、3 失败 */
+  /* 扩展片的状态：undefined/0 未开始、1 下载中、2 已装、3 失败（可再试） */
   var EXT_STATE = {};
   var EXT_WAIT = {};
+  var EXT_FAIL = {};   /* 字母 -> 连续失败次数，>= 2 就不再自动试 */
   window.__extState = function (c) { return c ? (EXT_STATE[c] || 0) : EXT_STATE; };
 
   function extLetterOf(w) {
@@ -175,12 +176,18 @@
     EXT_STATE[c] = 1;
     EXT_WAIT[c] = cb ? [cb] : [];
     cachedFetch('data/ext/' + c + '.json')
-      .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (j) {
-        if (j && j.d) { applyDict(j, 'more'); EXT_STATE[c] = 2; }
-        else EXT_STATE[c] = 3;
+      .then(function (r) {
+        if (!r || !r.ok) throw new Error('http');
+        return r.json();
       })
-      .catch(function () { EXT_STATE[c] = 3; })
+      .then(function (j) {
+        if (j && j.d) { applyDict(j, 'more'); EXT_STATE[c] = 2; EXT_FAIL[c] = 0; }
+        else throw new Error('empty');
+      })
+      .catch(function () {
+        EXT_STATE[c] = 3;
+        EXT_FAIL[c] = (EXT_FAIL[c] || 0) + 1;
+      })
       .then(function () {
         var q = EXT_WAIT[c] || [];
         EXT_WAIT[c] = [];
@@ -251,8 +258,11 @@
 
     /* 一片一片顺着下：上一片到手（或者失败）再下下一片，
        这样手机弱网时也是先能用、再变全，不会几 MB 抢带宽把首屏拖死。
-       扩展词库不在这里排期，走 ensureExtShard 按首字母按需加载。 */
-    function next(i) {
+       扩展词库不在这里排期，走 ensureExtShard 按首字母按需加载。
+       单片最多试 3 次：GitHub Pages 冷启动时 mid.json 偶发被截断，
+       一次失败就放弃会让整个词库停在 9000 词（线上真踩到过）。 */
+    function next(i, attempt) {
+      attempt = attempt || 0;
       if (i >= SHARDS.length) {
         if (!got) {
           if (hint) { hint.textContent = '词库加载失败，刷新试试'; hint.classList.remove('loading'); }
@@ -261,16 +271,27 @@
         }
         return;
       }
+      var advanced = false;
       cachedFetch(SHARDS[i])
-        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (r) {
+          if (!r || !r.ok) throw new Error('http');
+          return r.json();
+        })
         .then(function (j) {
           if (j && applyDict(j, i === 0 ? 'core' : 'more')) {
             got++;
             done();
           }
         })
-        .catch(function () { })
-        .then(function () { next(i + 1); });
+        .catch(function () {
+          if (attempt < 2) {
+            toast('词库下载中断，正在重试…');
+            advanced = true;
+            return new Promise(function (res) { setTimeout(res, 1200); })
+              .then(function () { return next(i, attempt + 1); });
+          }
+        })
+        .then(function () { if (!advanced) next(i + 1); });
     }
     next(0);
 
@@ -605,7 +626,8 @@
          失败（404/断网）就别重试了，直接给近似词，免得每次点击都白等。 */
       var L = extLetterOf(w);
       var st = EXT_STATE[L] || 0;
-      if (w.length > 1 && st !== 2 && st !== 3) {
+      var canTry = w.length > 1 && st !== 2 && (EXT_FAIL[L] || 0) < 2;
+      if (canTry) {
         toast('正在加载「' + (L === '_' ? '其它' : L.toUpperCase()) + '」开头的扩展词…');
         ensureExtShard(L, function (ok) {
           if (ok && lookup(w)) { doQuery(w, silent); return; }
