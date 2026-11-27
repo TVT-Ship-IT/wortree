@@ -13,7 +13,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
 <link rel="icon" href="icons/icon-192.png">
-<link rel="stylesheet" href="app.css?v=61">
+<link rel="stylesheet" href="app.css?v=62">
 </head>
 <body>
 
@@ -70,6 +70,16 @@
     <div class="view-head">
       <h2>记录单</h2>
       <span id="logSum" class="muted">共 0 天</span>
+    </div>
+    <div id="revCard" class="card rev-card">
+      <div class="rev-top">
+        <div>
+          <div class="rev-label">今天该复习</div>
+          <div class="rev-num" id="revDue">都过完了</div>
+        </div>
+        <button class="btn" id="btnReview" disabled>今天已经清空</button>
+      </div>
+      <div class="rev-foot"><i class="muted" id="revAll">0 个词在复习队列里</i></div>
     </div>
     <div id="logList" class="list"></div>
   </section>
@@ -164,7 +174,7 @@
   <div id="toast"></div>
 </div>
 
-<script src="tree3d.js?v=61"></script>
-<script src="app.js?v=61"></script>
+<script src="tree3d.js?v=62"></script>
+<script src="app.js?v=62"></script>
 </body>
 </html>

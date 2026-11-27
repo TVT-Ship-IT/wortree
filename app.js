@@ -6,9 +6,14 @@
 
   var GOAL = 2500;
   var DAILY_GOAL = 20;
+  /* 间隔重复的台阶（天）。连着答对一次就往后走一格，
+     答错就退回第一格 —— 忘掉的词第二天一定会再来找你。 */
+  var REV_STEPS = [1, 3, 7, 16, 35, 75, 160];
+  var REV_BATCH = 20;               /* 一次最多复习多少个，多了会烦 */
+  var DAY_MS = 86400000;
   var KEY = 'cy_state_v3';
   var KEY_BAK = 'cy_state_v3_bak';   /* 上一份自动备份：主记录写坏/读不出时兜底 */
-  var SCHEMA = 5;                    /* 数据结构版本，只增不减 */
+  var SCHEMA = 6;                    /* 数据结构版本，只增不减 */
   var OLD_KEY = 'cy_book_v1';
   /* 仅调试：地址栏 ?p=0.5 时按比例预览树，不写真实数据 */
   var PREVIEW_P = null;
@@ -64,7 +69,8 @@
       learned: {},
       days: {},
       book: [],
-      meta: { queries: 0, best: 0, done: false, first: Date.now(), deviceId: makeDeviceCode(), importedN: 0 }
+      review: {},
+      meta: { queries: 0, best: 0, done: false, first: Date.now(), deviceId: makeDeviceCode(), importedN: 0, revDone: 0 }
     };
   }
 
@@ -84,6 +90,15 @@
     if (from < 5) {
       /* v5：区分"自己查的"和"导入进来的" */
       if (typeof s.meta.importedN !== 'number') s.meta.importedN = 0;
+    }
+    if (from < 6) {
+      /* v6：间隔重复。老用户的词全部当作"刚学会"，从明天起排队复习 */
+      if (!s.review || typeof s.review !== 'object') s.review = {};
+      if (typeof s.meta.revDone !== 'number') s.meta.revDone = 0;
+      var now6 = Date.now();
+      Object.keys(s.learned || {}).forEach(function (w) {
+        if (!s.review[w]) s.review[w] = { n: 0, due: now6 + DAY_MS, last: 0 };
+      });
     }
     s.sv = SCHEMA;
     return s;
@@ -107,6 +122,7 @@
     s.learned = s.learned && typeof s.learned === 'object' ? s.learned : {};
     s.days = s.days && typeof s.days === 'object' ? s.days : {};
     s.book = Array.isArray(s.book) ? s.book : [];
+    s.review = s.review && typeof s.review === 'object' ? s.review : {};
     s.meta = s.meta || { queries: 0, best: 0, done: false };
     if (typeof s.meta.queries !== 'number') s.meta.queries = 0;
     if (typeof s.meta.best !== 'number') s.meta.best = 0;
@@ -730,6 +746,7 @@
     var isNew = !Object.prototype.hasOwnProperty.call(S.learned, w);
     if (isNew) {
       S.learned[w] = Date.now();
+      scheduleReview(w);
       var k = dayKey();
       if (!S.days[k]) S.days[k] = [];
       if (S.days[k].indexOf(w) < 0) S.days[k].push(w);
@@ -887,11 +904,152 @@
     });
   }
 
+  /* ================= 间隔重复 =================
+     查过的词不会自己记住。每个词记一个"下次该见面的时间"：
+     连着答对就往后拉一格（1→3→7→16→35→75→160 天），答错退回第一格。
+     到期数量显示在「记录」页顶上，一次最多复习 20 个。 */
+
+  function revRec(w) {
+    var r = S.review[w];
+    if (!r || typeof r !== 'object') { r = { n: 0, due: 0, last: 0 }; S.review[w] = r; }
+    if (typeof r.n !== 'number') r.n = 0;
+    if (typeof r.due !== 'number') r.due = 0;
+    if (typeof r.last !== 'number') r.last = 0;
+    return r;
+  }
+
+  /* 第一次查到这个词：明天来复习 */
+  function scheduleReview(w) {
+    if (S.review[w]) return;
+    S.review[w] = { n: 0, due: Date.now() + DAY_MS, last: 0 };
+  }
+
+  function revStepDays(n) {
+    return REV_STEPS[Math.min(Math.max(n, 0), REV_STEPS.length - 1)];
+  }
+
+  function revDueList(limit) {
+    var now = Date.now();
+    var out = [];
+    Object.keys(S.review).forEach(function (w) {
+      var r = S.review[w];
+      if (!r || typeof r.due !== 'number') return;
+      if (r.due <= now) out.push({ w: w, due: r.due, n: r.n || 0 });
+    });
+    out.sort(function (a, b) { return a.due - b.due; });
+    return limit ? out.slice(0, limit) : out;
+  }
+
+  function revDueCount() { return revDueList(0).length; }
+
+  function revAnswer(w, ok) {
+    var r = revRec(w);
+    var now = Date.now();
+    if (ok) {
+      r.n = Math.min((r.n || 0) + 1, REV_STEPS.length - 1);
+      r.due = now + revStepDays(r.n) * DAY_MS;
+      S.meta.revDone = (S.meta.revDone || 0) + 1;
+    } else {
+      r.n = 0;
+      r.due = now + DAY_MS;   /* 忘了就明天再来 */
+    }
+    r.last = now;
+    save();
+  }
+
+  var REV_Q = [], REV_I = 0, REV_OK = 0, REV_FLIP = false;
+
+  function startReview() {
+    var list = revDueList(REV_BATCH);
+    if (!list.length) { toast('今天没有要复习的词'); return; }
+    REV_Q = list.map(function (x) { return x.w; });
+    REV_I = 0; REV_OK = 0;
+    renderRevCard();
+  }
+
+  function renderRevCard() {
+    if (REV_I >= REV_Q.length) {
+      var left = revDueCount();
+      var h = '<div class="w-head"><div class="w-word">复习完成</div>' +
+        '<div class="w-badge"><span class="badge new">' + REV_OK + '/' + REV_Q.length + '</span></div></div>' +
+        '<div class="rev-done"><div class="rev-big">' + REV_OK + '</div>' +
+        '<div class="rev-sub">答对了 ' + REV_OK + ' 个，' + (REV_Q.length - REV_OK) + ' 个明天再来</div></div>' +
+        (left ? '<div class="imp-tip">还有 ' + left + ' 个到期，随时可以再来一轮</div>'
+          : '<div class="imp-tip">到期的都过完了，树的叶子绿得踏实一点了</div>') +
+        '<div class="rev-btns"><button class="btn" id="revClose">好</button></div>';
+      openSheet(h);
+      var b = $('revClose');
+      if (b) b.addEventListener('click', function () { closeSheet(); refreshProgress(true); renderLog(); });
+      REV_Q = []; REV_I = 0;
+      return;
+    }
+    var w = REV_Q[REV_I];
+    var e = lookup(w) || ['', '', ''];
+    var us = e[0] || '', uk = e[1] || '';
+    var defs = splitDefs(e[2]);
+    REV_FLIP = false;
+    var h2 = '<div class="w-head"><div class="w-word">' + esc(w) + '</div>' +
+      '<div class="w-badge"><span class="chip">' + (REV_I + 1) + '/' + REV_Q.length + '</span></div></div>';
+    h2 += '<div class="w-phon">';
+    if (us) h2 += '<div class="ph-row"><span class="ph-tag">美</span><span class="ph-ipa">' + esc(ipa(us)) + '</span>' +
+      '<button class="spk" data-spk="1">🔊</button></div>';
+    if (uk) h2 += '<div class="ph-row"><span class="ph-tag">英</span><span class="ph-ipa">' + esc(ipa(uk)) + '</span>' +
+      '<button class="spk" data-spk="2">🔊</button></div>';
+    h2 += '</div>';
+    h2 += '<div class="rev-flip" id="revFlip">点一下，看你还记不记得</div>';
+    h2 += '<div class="rev-def" id="revDef" hidden>' + (defs.length ? defs.map(function (d) { return '<div class="d-line">' + esc(d) + '</div>'; }).join('') : '<div class="d-line" style="color:var(--dim)">这个词没有释义</div>') + '</div>';
+    h2 += '<div class="rev-btns" id="revBtns" hidden>' +
+      '<button class="btn ghost" id="revNo">忘了</button>' +
+      '<button class="btn" id="revYes">记住了</button></div>';
+    openSheet(h2);
+
+    var fl = $('revFlip');
+    if (fl) fl.addEventListener('click', function () {
+      if (REV_FLIP) { return; }
+      REV_FLIP = true;
+      fl.hidden = true;
+      var d = $('revDef'), b = $('revBtns');
+      if (d) d.hidden = false;
+      if (b) b.hidden = false;
+      speak(w, 1, null);
+    });
+    var yes = $('revYes'), no = $('revNo');
+    if (yes) yes.addEventListener('click', function () { revStep(true); });
+    if (no) no.addEventListener('click', function () { revStep(false); });
+    var sp = $('sheetBody').querySelectorAll('[data-spk]');
+    for (var i = 0; i < sp.length; i++) {
+      sp[i].addEventListener('click', function () { speak(w, this.dataset.spk, this); });
+    }
+  }
+
+  function revStep(ok) {
+    var w = REV_Q[REV_I];
+    if (w) {
+      revAnswer(w, ok);
+      if (ok) { REV_OK++; tree.splash(); } else { tree.shake && tree.shake(); }
+    }
+    REV_I++;
+    renderRevCard();
+  }
+
   function renderLog() {
     var el = $('logList');
     var keys = Object.keys(S.days).filter(function (k) { return S.days[k] && S.days[k].length; });
     keys.sort().reverse();
     $('logSum').textContent = '共 ' + keys.length + ' 天 · 连续 ' + streak() + ' 天';
+
+    /* 记录页顶上的复习入口：没有到期的词就不打扰 */
+    var dc = revDueCount();
+    if ($('revDue')) {
+      $('revDue').textContent = dc ? dc + ' 个' : '都过完了';
+      $('revDue').className = dc ? 'rev-num hot' : 'rev-num';
+    }
+    if ($('revCard')) $('revCard').classList.toggle('empty-rev', !dc);
+    if ($('btnReview')) {
+      $('btnReview').textContent = dc ? '开始复习 ' + Math.min(dc, REV_BATCH) + ' 个' : '今天已经清空';
+      $('btnReview').disabled = !dc;
+    }
+    if ($('revAll')) $('revAll').textContent = Object.keys(S.review).length + ' 个词在复习队列里';
 
     if (!keys.length) {
       el.innerHTML = '<div class="empty">还没有记录。<br>去查第一个单词吧。</div>';
@@ -1285,7 +1443,10 @@
       } else {
         Object.keys(st.learned || {}).forEach(function (w) {
           var t = st.learned[w] || Date.now();
-          if (!Object.prototype.hasOwnProperty.call(S.learned, w) || S.learned[w] > t) S.learned[w] = t;
+          if (!Object.prototype.hasOwnProperty.call(S.learned, w) || S.learned[w] > t) {
+            S.learned[w] = t;
+            scheduleReview(w);
+          }
         });
         Object.keys(st.days || {}).forEach(function (d) {
           var a = S.days[d] || [];
@@ -1574,6 +1735,37 @@
 
     chk('单帧渲染 < 8ms', perfAvg < 8, perfAvg.toFixed(2) + 'ms');
 
+    /* 复习机制：到期判定、答对拉长、答错归零 */
+    try {
+      var savedRev = JSON.stringify(S.review);
+      var savedMeta = JSON.stringify(S.meta);
+      var nowR = Date.now();
+      S.review = {
+        __t_due: { n: 1, due: nowR - 1000, last: 0 },
+        __t_future: { n: 3, due: nowR + 5 * DAY_MS, last: 0 }
+      };
+      var dl = revDueList(0);
+      chk('到期判定只算过期的', dl.length === 1 && dl[0].w === '__t_due', dl.length + ' 个');
+
+      revAnswer('__t_due', true);
+      var r1 = S.review['__t_due'];
+      var gapOk = r1.n === 2 && r1.due >= nowR + 6.9 * DAY_MS;
+      chk('记住了会往后拉长', gapOk, 'n=' + r1.n + ' 间隔≈' + Math.round((r1.due - nowR) / DAY_MS) + '天');
+
+      revAnswer('__t_due', false);
+      var r2 = S.review['__t_due'];
+      chk('忘了会归零且明天再来', r2.n === 0 && r2.due >= nowR + 0.9 * DAY_MS && r2.due <= nowR + 1.1 * DAY_MS,
+        'n=' + r2.n + ' 间隔≈' + Math.round((r2.due - nowR) / DAY_MS) + '天');
+
+      chk('复习阶梯是 1/3/7/16/35/75/160', revStepDays(0) === 1 && revStepDays(2) === 7 && revStepDays(6) === 160 &&
+        revStepDays(99) === 160, REV_STEPS.join('/'));
+
+      S.review = JSON.parse(savedRev);
+      S.meta = JSON.parse(savedMeta);
+    } catch (e) {
+      chk('复习机制', false, String(e && e.message || e));
+    }
+
       var t1 = performance.now();
       prefixMatches('a', 8); prefixMatches('b', 8);
       var pms2 = Math.round(performance.now() - t1);
@@ -1666,6 +1858,7 @@
       e.target.value = '';
       if (arr.length) ocrImage(arr);
     });
+    if ($('btnReview')) $('btnReview').addEventListener('click', function () { startReview(); });
     if ($('btnUndoImport')) $('btnUndoImport').addEventListener('click', function () {
       var li = S.meta.lastImport;
       if (!li || !li.n) { toast('没有可以撤销的导入'); return; }
