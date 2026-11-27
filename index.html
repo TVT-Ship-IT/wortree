@@ -13,7 +13,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
 <link rel="icon" href="icons/icon-192.png">
-<link rel="stylesheet" href="app.css?v=55">
+<link rel="stylesheet" href="app.css?v=60">
 </head>
 <body>
 
@@ -93,13 +93,13 @@
         <input id="fileImport" type="file" accept=".json,.txt,.csv,.tsv,application/json,text/plain,text/csv" hidden>
       </div>
       <div class="card">
-        <div class="card-row"><span>拍照 / 截图导入</span><i class="muted">单词表的照片，认出英文词直接上树</i></div>
+        <div class="card-row"><span>拍照 / 截图导入</span><i class="muted">可一次选多张，认出英文词直接上树</i></div>
         <div class="card-row"><span>上次导入</span><i class="muted" id="mineImport">没有导入记录</i></div>
         <div class="btnrow">
           <button class="btn" id="btnPhoto">选照片识别</button>
           <button class="btn ghost" id="btnUndoImport">撤销上次导入</button>
         </div>
-        <input id="filePhoto" type="file" accept="image/*" capture="environment" hidden>
+        <input id="filePhoto" type="file" accept="image/*" multiple hidden>
       </div>
       <div class="card">
         <div class="card-row"><span>我的档案号</span><b id="mineCode">—</b></div>
@@ -164,7 +164,7 @@
   <div id="toast"></div>
 </div>
 
-<script src="tree3d.js?v=55"></script>
-<script src="app.js?v=55"></script>
+<script src="tree3d.js?v=60"></script>
+<script src="app.js?v=60"></script>
 </body>
 </html>

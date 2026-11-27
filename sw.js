@@ -10,7 +10,7 @@
  *
  * 改前端文件后，必须同时改 index.html 的 ?v=N（三处）和这里的 VERSION。
  */
-const VERSION = 'cy-v55';
+const VERSION = 'cy-v60';
 const SHELL = VERSION + '-shell';
 const DATA = VERSION + '-data';
 

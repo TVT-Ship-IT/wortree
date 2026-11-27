@@ -1097,19 +1097,34 @@
     if (tx && text) tx.textContent = text;
   }
 
-  function ocrImage(file) {
-    if (OCR_BUSY) { toast('上一张还在识别，稍等一下'); return; }
+  /* 一次可以选多张。第一张要下引擎（约 7MB），之后每张只要 1-3 秒。
+     全部识别完再合并成一次导入，只上树一次。 */
+  function ocrImage(files) {
+    if (OCR_BUSY) { toast('上一批还在识别，稍等一下'); return; }
+    var list = [];
+    for (var fi = 0; fi < files.length; fi++) if (files[fi]) list.push(files[fi]);
+    if (!list.length) return;
     OCR_BUSY = true;
-    var sz = file.size > 1048576 ? (file.size / 1048576).toFixed(1) + 'MB' : Math.round(file.size / 1024) + 'KB';
-    openSheet('<div class="w-head"><div class="w-word">识别图片里的词</div>' +
-      '<div class="w-badge"><span class="chip">' + esc(sz) + '</span></div></div>' +
+
+    var total = list.length;
+    var doneN = 0;
+    var allWords = [];
+    var seenW = {};
+
+    var h = '<div class="w-head"><div class="w-word">识别图片里的词</div>' +
+      '<div class="w-badge"><span class="chip">' + total + ' 张</span></div></div>' +
       '<div class="ocr-box"><div class="ocr-track"><div id="ocrBar" class="ocr-bar"></div></div>' +
       '<div id="ocrTxt" class="ocr-txt">正在准备识别引擎…</div></div>' +
-      '<div class="imp-tip">第一次用要下载约 7MB 识别引擎，之后就不用再下了。识别一张图大概 3–10 秒。</div>');
-    ocrSet(4, '正在准备识别引擎（第一次要下载约 7MB，之后不再下）…');
+      '<div class="imp-tip">第一次用要下载约 7MB 识别引擎，之后就不用再下了。一张图大概 1–4 秒。</div>';
+    openSheet(h);
+    ocrSet(3, '正在准备识别引擎（第一次要下载约 7MB，之后不再下）…');
+
+    function step() {
+      return Promise.resolve();
+    }
 
     loadOcrEngine().then(function (T) {
-      ocrSet(14, '引擎就绪，开始识别…');
+      ocrSet(10, '引擎就绪，开始识别…');
       var opt = {
         workerPath: 'vendor/worker.min.js',
         corePath: 'vendor/tesseract-core-simd-lstm.wasm.js',
@@ -1117,22 +1132,42 @@
         logger: function (m) {
           if (!m || !m.status) return;
           var pr = typeof m.progress === 'number' ? m.progress : 0;
-          if (m.status === 'loading language traineddata') ocrSet(16 + pr * 26, '正在加载英文识别模型…');
-          else if (m.status === 'recognizing text') ocrSet(44 + pr * 52, '正在认字… ' + Math.round(pr * 100) + '%');
+          var base = 10 + (doneN / total) * 85;
+          var span = 85 / total;
+          var tag = total > 1 ? '第 ' + (doneN + 1) + '/' + total + ' 张 · ' : '';
+          if (m.status === 'loading language traineddata') ocrSet(base + pr * span * 0.4, tag + '正在加载英文识别模型…');
+          else if (m.status === 'recognizing text') ocrSet(base + span * 0.4 + pr * span * 0.6, tag + '正在认字… ' + Math.round(pr * 100) + '%');
         }
       };
       var p = OCR_WORKER ? Promise.resolve(OCR_WORKER) : T.createWorker('eng', 1, opt);
+
       return p.then(function (w) {
         OCR_WORKER = w;
         return w.setParameters({ tessedit_pageseg_mode: '6', preserve_interword_spaces: '1' })
-          .then(function () { return w.recognize(file); });
+          .then(function () {
+            var chain = step();
+            list.forEach(function (f) {
+              chain = chain.then(function () {
+                return w.recognize(f).then(function (res) {
+                  var txt = (res && res.data && res.data.text) || '';
+                  String(txt).split(/\r?\n/).forEach(function (x) {
+                    var word = extractWord(x);
+                    if (!word || !/^[a-z][a-z'\- ]{1,28}$/.test(word) || seenW[word]) return;
+                    seenW[word] = 1;
+                    allWords.push(word);
+                  });
+                  doneN++;
+                  ocrSet(10 + (doneN / total) * 85, '已认完 ' + doneN + '/' + total + ' 张…');
+                });
+              });
+            });
+            return chain;
+          });
       });
-    }).then(function (res) {
+    }).then(function () {
       OCR_BUSY = false;
-      var txt = (res && res.data && res.data.text) || '';
       ocrSet(100, '识别完成');
-      if (!txt.trim()) { toast('这张图里没认出文字，换张清楚点的试试'); closeSheet(); return; }
-      finishOcr(txt, file.name);
+      finishOcr(allWords);
     }).catch(function (e) {
       OCR_BUSY = false;
       if (OCR_WORKER) { try { OCR_WORKER.terminate(); } catch (x) { } OCR_WORKER = null; }
@@ -1164,25 +1199,18 @@
     });
   }
 
-  /* 拍完/选完图，认得出来的词直接上树——不在面板上停下来让你确认。
+  /* 认出来的词直接上树——不在面板上停下来让你确认。
      认错的那一两个，去「我的」页点「撤销上次导入」就全撤掉。 */
-  function finishOcr(txt, fname) {
-    var lines = String(txt).split(/\r?\n/);
-    var seen = {}, uniq = [];
-    lines.forEach(function (x) {
-      /* 这里不能用 norm() 兜底：OCR 行里"adj. 好斗的"这种剥完词性剩下的残渣
-         会被 norm 压成 "ad" 当成单词收进来。文本文件那条路才需要兜底。 */
-      var w = extractWord(x);
-      if (!w || !/^[a-z][a-z'\- ]{1,28}$/.test(w) || seen[w]) return;
-      seen[w] = 1;
-      uniq.push(w);
-    });
-    uniq = stripHeaders(uniq, true);
-    if (!uniq.length) { toast('这张图里没认出英文单词，换张清楚点的'); closeSheet(); return; }
+  function finishOcr(rawWords) {
+    /* 两个字母以下的一律不要：照片里极易把词性缩写（Vv./nv./ad)/adv）认成单词，
+       而单词表照片里本来也几乎没有 go/up 这种双字母词。要查就手打。 */
+    var cleaned = rawWords.filter(function (w) { return w.length >= 3; });
+    var uniq = stripHeaders(cleaned, true);
+    if (!uniq.length) { toast('没认出英文单词，换张清楚点的'); closeSheet(); return; }
     var hit = [];
     uniq.forEach(function (w) {
       var g = lookupSmart(w);
-      if (g && hit.indexOf(g) < 0) hit.push(g);
+      if (g && g.length >= 3 && hit.indexOf(g) < 0) hit.push(g);
     });
     if (!hit.length) { toast('认出了字，但词库里没有这些词'); closeSheet(); return; }
     applyImport({ kind: 'list', from: 'ocr', words: hit }, hit, false);
@@ -1630,9 +1658,9 @@
     });
     if ($('btnPhoto')) $('btnPhoto').addEventListener('click', function () { $('filePhoto').click(); });
     if ($('filePhoto')) $('filePhoto').addEventListener('change', function (e) {
-      var f = e.target.files && e.target.files[0];
+      var fs = e.target.files;
       e.target.value = '';
-      if (f) ocrImage(f);
+      if (fs && fs.length) ocrImage(fs);
     });
     if ($('btnUndoImport')) $('btnUndoImport').addEventListener('click', function () {
       var li = S.meta.lastImport;
