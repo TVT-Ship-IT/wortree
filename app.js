@@ -1657,10 +1657,14 @@
       e.target.value = '';
     });
     if ($('btnPhoto')) $('btnPhoto').addEventListener('click', function () { $('filePhoto').click(); });
+    /* 一定要先把文件抄进数组再清空 input：input.value='' 会把 FileList 一起清掉，
+     之后读 files.length 就是 0，选完照片会静默什么都不发生。 */
     if ($('filePhoto')) $('filePhoto').addEventListener('change', function (e) {
-      var fs = e.target.files;
+      var arr = [];
+      var fl = e.target.files;
+      if (fl) for (var i = 0; i < fl.length; i++) arr.push(fl[i]);
       e.target.value = '';
-      if (fs && fs.length) ocrImage(fs);
+      if (arr.length) ocrImage(arr);
     });
     if ($('btnUndoImport')) $('btnUndoImport').addEventListener('click', function () {
       var li = S.meta.lastImport;
